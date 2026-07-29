@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Health Engine reads resting heart rate, HRV, sleep, VO2 max, respiratory rate and wrist temperature from Health to compute your baselines. Everything is processed on your device.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Health Engine reads meeting hours and schedule shape from your calendar, on-device, to look for associations with your physiology.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Health Engine uses infrequent, significant location changes to estimate time spent away from home and timezone shifts. It never tracks continuous location.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Health Engine uses infrequent, significant location changes to estimate time spent away from home and timezone shifts. It never tracks continuous location.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>healthkit</string>
+	</array>
+</dict>
+</plist>

@@ -36,7 +36,9 @@ final class AppServices: ObservableObject {
                                                  withIntermediateDirectories: true)
         // A store that cannot open is a fatal condition, not a degraded one — there is nowhere
         // to put anything. In-memory keeps the app inspectable rather than crashing on launch.
-        self.store = (try? Store(path: url.path())) ?? (try! Store.inMemory())
+        // `path(percentEncoded:)` must be false: the zero-arg `.path()` returns a percent-encoded
+        // string (spaces as %20), which SQLite reads as a literal filename and fails to open.
+        self.store = (try? Store(path: url.path(percentEncoded: false))) ?? (try! Store.inMemory())
         self.healthKit = HealthKitService(store: store)
         self.context = ContextService(store: store)
         self.garmin = GarminImport(store: store)

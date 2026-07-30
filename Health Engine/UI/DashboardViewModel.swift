@@ -14,12 +14,19 @@ public final class DashboardViewModel: ObservableObject {
     @Published public private(set) var summary: String = ""
     @Published public private(set) var summaryIsTemplated = true
 
-    private let store: Store
+    private var store: Store
     private let calendar: Calendar
 
     public init(store: Store, calendar: Calendar = .autoupdatingCurrent) {
         self.store = store
         self.calendar = calendar
+    }
+
+    /// Swaps in the app's real store. `DashboardView` constructs this view model before
+    /// `AppServices` is available via environment, so it starts on a throwaway store and
+    /// attaches the real one once the environment is readable.
+    public func attach(store: Store) {
+        self.store = store
     }
 
     public func reload() {

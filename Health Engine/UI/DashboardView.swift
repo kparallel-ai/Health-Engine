@@ -36,7 +36,7 @@ struct DashboardView: View {
             }
             .navigationTitle("Today")
             .refreshable { services.triggerRecompute(); model.reload() }
-            .task { model.reload() }
+            .task { model.attach(store: services.store); model.reload() }
             .onReceive(services.recompute.$lastCompleted.compactMap { $0 }) { _ in model.reload() }
         }
     }

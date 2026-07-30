@@ -75,8 +75,34 @@ near-unit-root autocorrelation on under three months of data — is below the 90
 association gate anyway, so nothing reaches T1 there. It is recorded rather than hidden, and
 it is the first thing to revisit if the minimum-N gates are ever loosened.
 
-Everything above is reproducible from `Tests/StatsTests.swift`, which runs the gate at 500
-trials in PR CI and 1,000 nightly.
+Everything above is reproducible from `Health EngineTests/StatsTests.swift`, which runs the
+gate at 500 trials in PR CI and 1,000 nightly.
+
+---
+
+## Xcode project — wired
+
+- App target "Health Engine" (module name `HealthIntelligence`, matching `SPEC.md` §3's
+  `HealthIntelligence/` source root), sources laid out exactly per §3 as file-system
+  synchronized groups — `Health/`, `Store/`, `Intelligence/`, `Evidence/`, `UI/`.
+- GRDB via SPM (`groue/GRDB.swift`, up to next major from 7.0.0), linked into the app target.
+- `Info.plist` carries `NSHealthShareUsageDescription`, `NSCalendarsFullAccessUsageDescription`,
+  `NSLocationAlwaysAndWhenInUseUsageDescription`/`NSLocationWhenInUseUsageDescription`, and
+  `UIBackgroundModes: [healthkit]`, merged with the build-setting-generated Info.plist.
+  Deliberately **no** networking entitlement, per invariant 1.
+- HealthKit capability (`com.apple.developer.healthkit`, `.access`) is in
+  `Health Engine.entitlements` and registered in the project's `SystemCapabilities` so
+  automatic signing provisions it — including on a free/Personal Team, which does support
+  HealthKit despite an earlier, incorrect assumption to the contrary here.
+- `Health EngineTests` unit test target (hosted in the app, `@testable import
+  HealthIntelligence`), wired with a shared `.xcscheme` covering build + test.
+  `testBHHandlesTiesAndEdgeCases`' hardcoded tie-case expectation was wrong (0.08 instead of
+  the correct 0.02·4/3 ≈ 0.02667) — verified independently against R's `p.adjust(method="BH")`
+  and against the passing `testBHMatchesReferenceValues` test; the test literal was fixed, not
+  `benjaminiHochberg`.
+- Builds and runs on both iOS Simulator and a physical device. Full test suite passes,
+  including the AR(1) false-positive gate (§A6, ~210s at 500 trials) and the white-noise and
+  power-retention checks.
 
 ---
 
@@ -104,10 +130,6 @@ What A12 needs, concretely:
 
 ## Not yet wired
 
-- **Xcode project.** The files are laid out exactly per `SPEC.md` §3; they need an iOS app
-  target, GRDB via SPM, and Info.plist entries for `NSHealthShareUsageDescription`,
-  `NSCalendarsFullAccessUsageDescription`, `NSLocationAlwaysAndWhenInUseUsageDescription`,
-  plus the HealthKit capability. Deliberately **no** networking entitlement.
 - **CoreLocation visit accumulation.** `ContextService` posts visits on a notification;
   nothing yet holds them between launches. Third in the cut order, and EventKit alone
   reaches tier 2.

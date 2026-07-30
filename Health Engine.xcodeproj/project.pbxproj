@@ -10,7 +10,18 @@
 		4AC0DC0B5B1F0F6CDCEFCC04 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A104F7A5A8DA169B1B0FC4DC /* GRDB */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		4B716069C29DBDBE32F26A2E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F625E019301A4BBA00133F4E /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F625E020301A4BBB00133F4E;
+			remoteInfo = "Health Engine";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		02230D8A79539AEBB4F25F4F /* Health EngineTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Health EngineTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F625E021301A4BBB00133F4E /* Health Engine.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Health Engine.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -26,6 +37,13 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		071EA1101777AAFE45170849 /* Health EngineTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
+			path = "Health EngineTests";
+			sourceTree = "<group>";
+		};
 		F625E023301A4BBB00133F4E /* Health Engine */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
@@ -37,6 +55,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		BF6037BDA5C8564298D39B93 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F625E01E301A4BBB00133F4E /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -53,6 +78,7 @@
 			children = (
 				F625E023301A4BBB00133F4E /* Health Engine */,
 				F625E022301A4BBB00133F4E /* Products */,
+				071EA1101777AAFE45170849 /* Health EngineTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -60,6 +86,7 @@
 			isa = PBXGroup;
 			children = (
 				F625E021301A4BBB00133F4E /* Health Engine.app */,
+				02230D8A79539AEBB4F25F4F /* Health EngineTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -67,6 +94,27 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		0563B3B0FAA457A18BE824A7 /* Health EngineTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CA84EB88B00E35B1C7EA0195 /* Build configuration list for PBXNativeTarget "Health EngineTests" */;
+			buildPhases = (
+				3098B465A4A88C581824A906 /* Sources */,
+				BF6037BDA5C8564298D39B93 /* Frameworks */,
+				72B63A44798C3ED313142051 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				55A7AF52B00E34571BA31FBD /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				071EA1101777AAFE45170849 /* Health EngineTests */,
+			);
+			name = "Health EngineTests";
+			productName = "Health EngineTests";
+			productReference = 02230D8A79539AEBB4F25F4F /* Health EngineTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		F625E020301A4BBB00133F4E /* Health Engine */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = F625E02C301A4BBC00133F4E /* Build configuration list for PBXNativeTarget "Health Engine" */;
@@ -104,6 +152,11 @@
 				TargetAttributes = {
 					F625E020301A4BBB00133F4E = {
 						CreatedOnToolsVersion = 26.6;
+						SystemCapabilities = {
+							com.apple.HealthKit = {
+								enabled = 1;
+							};
+						};
 					};
 				};
 			};
@@ -125,11 +178,19 @@
 			projectRoot = "";
 			targets = (
 				F625E020301A4BBB00133F4E /* Health Engine */,
+				0563B3B0FAA457A18BE824A7 /* Health EngineTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		72B63A44798C3ED313142051 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F625E01F301A4BBB00133F4E /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -140,6 +201,13 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		3098B465A4A88C581824A906 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F625E01D301A4BBB00133F4E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -149,7 +217,47 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		55A7AF52B00E34571BA31FBD /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F625E020301A4BBB00133F4E /* Health Engine */;
+			targetProxy = 4B716069C29DBDBE32F26A2E /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		6801A33A2DEC6B7F25423346 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				PRODUCT_BUNDLE_IDENTIFIER = "Personal.Health-Engine.Health-EngineTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Health Engine.app/Health Engine";
+			};
+			name = Release;
+		};
+		7F6979E934A6111474971FFB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				PRODUCT_BUNDLE_IDENTIFIER = "Personal.Health-Engine.Health-EngineTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Health Engine.app/Health Engine";
+			};
+			name = Debug;
+		};
 		F625E02A301A4BBC00133F4E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -344,6 +452,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		CA84EB88B00E35B1C7EA0195 /* Build configuration list for PBXNativeTarget "Health EngineTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7F6979E934A6111474971FFB /* Debug */,
+				6801A33A2DEC6B7F25423346 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		F625E01C301A4BBB00133F4E /* Build configuration list for PBXProject "Health Engine" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

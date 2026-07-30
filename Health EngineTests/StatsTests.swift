@@ -99,10 +99,13 @@ final class StatsTests: XCTestCase {
         XCTAssertTrue(benjaminiHochberg([]).isEmpty)
         XCTAssertEqual(benjaminiHochberg([0.03]), [0.03])
 
+        // Ties must share the same, most-conservative q-value: R's p.adjust(method="BH")
+        // gives 0.02·4/3 for three tied p = 0.02 out of four, not 0.02·4/1 for each in
+        // isolation — that would let tie-breaking order change the result, which BH forbids.
         let ties = benjaminiHochberg([0.02, 0.02, 0.02, 0.9])
         XCTAssertEqual(ties[0], ties[1], accuracy: 1e-12)
         XCTAssertEqual(ties[1], ties[2], accuracy: 1e-12)
-        XCTAssertEqual(ties[0], 0.08, accuracy: 1e-12)
+        XCTAssertEqual(ties[0], 0.02 * 4.0 / 3.0, accuracy: 1e-12)
     }
 
     func testBHIsMonotoneInP() {

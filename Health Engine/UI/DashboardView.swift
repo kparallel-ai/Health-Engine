@@ -185,7 +185,7 @@ struct DashboardView: View {
         VStack(alignment: .leading, spacing: 12) {
             SectionHeader(title: "Findings · \(model.findings.count) surfaced")
             ForEach(model.findings.prefix(3)) { finding in
-                FindingRow(finding: finding)
+                FindingRow(finding: finding, store: services.store)
                     .cardStyle()
             }
         }

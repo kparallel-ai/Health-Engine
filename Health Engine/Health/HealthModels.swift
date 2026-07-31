@@ -153,6 +153,43 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .enduranceScore:                               return "figure.run"
         }
     }
+
+    /// Groups metrics that are near-duplicates of each other for display purposes — Body
+    /// Battery min/max, or the different sleep sub-measures, are different numbers but the
+    /// same underlying story. Used only to collapse redundant findings in the UI; has no
+    /// effect on the scan itself, which still tests every metric individually.
+    public var correlationFamily: MetricFamily {
+        switch self {
+        case .sleepDuration, .sleepEfficiency, .sleepDeep, .sleepREM, .sleepOnset:
+            return .sleep
+        case .hrvSDNNOvernight, .hrvRMSSDOvernight, .hrvStatusGarmin:
+            return .hrv
+        case .bodyBatteryMin, .bodyBatteryMax:
+            return .bodyBattery
+        case .hrResting, .thresholdLactateHR:
+            return .heartRate
+        case .respirationAvgOvernight:
+            return .respiration
+        case .tempWristDeviation:
+            return .temperature
+        case .stressAvg:
+            return .stress
+        case .loadStrainTrimp, .loadTrainingGarmin:
+            return .load
+        case .spo2AvgOvernight:
+            return .oxygen
+        case .vo2maxRunning, .enduranceScore:
+            return .fitness
+        case .ctxMeetingHours, .ctxFirstEventHour, .ctxLastEventHour,
+             .ctxMinutesOutsideHome, .ctxTimezoneShift:
+            return .context
+        }
+    }
+}
+
+public enum MetricFamily: String, Hashable, Sendable {
+    case sleep, hrv, bodyBattery, heartRate, respiration, temperature, stress, load,
+         oxygen, fitness, context
 }
 
 public enum Source: String, Codable, Sendable {

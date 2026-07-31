@@ -155,7 +155,15 @@ public enum Analyzer {
 
         for (construct, cSeries) in constructSeries.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
             for (feature, fSeries) in featureSeries.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
-                if symmetric && construct == feature { continue }
+                // Not just "not itself" — not a near-duplicate of itself either. Sleep duration
+                // and REM minutes will correlate because REM is mechanically close to a fraction
+                // of total sleep time, not because one finding says anything the other didn't.
+                // Testing a metric family against itself produces a "finding" that's true by
+                // construction rather than a genuine cross-domain observation, so it's excluded
+                // from the candidate pool entirely — not merely deduplicated after the fact.
+                if symmetric && (construct == feature || construct.correlationFamily == feature.correlationFamily) {
+                    continue
+                }
                 for lag in config.lags {
                     if symmetric && lag == 0 && construct.rawValue > feature.rawValue { continue }
                     let pair = align(construct: cSeries, feature: fSeries, lag: lag, calendar: calendar)

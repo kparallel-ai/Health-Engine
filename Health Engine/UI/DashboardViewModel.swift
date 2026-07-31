@@ -9,7 +9,6 @@ import SwiftUI
 public final class DashboardViewModel: ObservableObject {
 
     @Published public private(set) var today: [DailyConstruct] = []
-    @Published public private(set) var findings: [Finding] = []
     @Published public private(set) var dayCount: Int = 0
     @Published public private(set) var summary: String = ""
     @Published public private(set) var summaryIsTemplated = true
@@ -41,7 +40,6 @@ public final class DashboardViewModel: ObservableObject {
             today = []
         }
 
-        findings = (try? store.surfacedFindings()) ?? []
         summary = Templates.dailySummary(constructs: today)
         summaryIsTemplated = true
     }

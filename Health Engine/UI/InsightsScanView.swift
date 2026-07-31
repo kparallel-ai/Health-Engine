@@ -39,6 +39,24 @@ struct InsightsScanView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .cardStyle(padding: 14)
 
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(isOn: $services.llmEnabled) {
+                        Label("On-device AI explanations", systemImage: "sparkles")
+                            .foregroundStyle(Theme.textPrimary)
+                    }
+                    .tint(Theme.accent)
+                    Text("""
+                         When on, Apple's on-device model writes a short explanation for each \
+                         finding, grounded only in your own numbers and a bundled research \
+                         corpus — nothing leaves your phone. It never states a figure that \
+                         wasn't handed to it, and falls back to a plain-language template \
+                         automatically if it can't produce a grounded answer.
+                         """)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                .cardStyle(padding: 14)
+
                 if let lastComputedAt {
                     Text("Last updated \(lastComputedAt.formatted(.relative(presentation: .named)))")
                         .font(.caption).foregroundStyle(Theme.textTertiary)

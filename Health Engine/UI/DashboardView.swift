@@ -51,7 +51,6 @@ struct DashboardView: View {
                                 UnlockTimeline(unlocks: model.unlocks(currentTier: services.tier),
                                                tier: services.tier)
                             }
-                            if !model.findings.isEmpty { findingsPreview }
                         }
                     }
                     .padding()
@@ -181,15 +180,6 @@ struct DashboardView: View {
         }
     }
 
-    private var findingsPreview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SectionHeader(title: "Findings · \(model.findings.count) surfaced")
-            ForEach(model.findings.prefix(3)) { finding in
-                FindingRow(finding: finding, store: services.store)
-                    .cardStyle()
-            }
-        }
-    }
 }
 
 // MARK: - Construct card

@@ -167,6 +167,13 @@ struct FindingsView: View {
 struct FindingRow: View {
     let finding: Finding
     let store: Store
+    @EnvironmentObject private var services: AppServices
+
+    private enum NarrationState {
+        case pending
+        case ready(Narrator.Output)
+    }
+    @State private var narration: NarrationState = .pending
 
     /// Which candidate pool this came from — context associations require calendar/location
     /// permission and months of data; biometric ones don't, so the two read very differently
@@ -187,25 +194,81 @@ struct FindingRow: View {
                         .tracking(0.6)
                         .foregroundStyle(Theme.textTertiary)
                 }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(Templates.finding(finding))
-                    .font(.body)
-                    .foregroundStyle(Theme.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let rationale = Templates.rationale(for: finding) {
-                    Text(rationale)
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                if case .ready(let output) = narration, !output.isTemplated {
+                    AIGeneratedBadge()
                 }
             }
+
+            explanation
 
             FindingTimeline(finding: finding, store: store)
         }
         .padding(.vertical, 4)
+        .task(id: finding.id) {
+            guard services.llmEnabled else { narration = .pending; return }
+            let query = FindingNarration.query(for: finding, profile: services.profile)
+            let facts = FindingNarration.facts(for: finding)
+            let output = await services.narrator.narrate(finding: finding, facts: facts, query: query)
+            narration = .ready(output)
+        }
+    }
+
+    /// The on-device model, when it actually spoke, replaces the template line *and* the
+    /// hand-written rationale with its own grounded prose plus the evidence it cited — that's
+    /// the whole point of running it. Anything short of a clean generation (disabled, refused,
+    /// below the retrieval floor, model unavailable) falls straight back to the same deterministic
+    /// copy this screen always showed, unlabeled, because a template is not a failure state.
+    @ViewBuilder
+    private var explanation: some View {
+        switch narration {
+        case .pending:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(Templates.finding(finding))
+                    .font(.body).foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let rationale = Templates.rationale(for: finding) {
+                    Text(rationale).font(.caption).foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        case .ready(let output) where !output.isTemplated:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(output.text)
+                    .font(.body).foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !output.citations.isEmpty {
+                    Text("Based on: " + output.citations.map(\.citation).joined(separator: "; "))
+                        .font(.caption2).foregroundStyle(Theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        case .ready:
+            VStack(alignment: .leading, spacing: 6) {
+                Text(Templates.finding(finding))
+                    .font(.body).foregroundStyle(Theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let rationale = Templates.rationale(for: finding) {
+                    Text(rationale).font(.caption).foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+/// Honest labeling for the one line per finding that actually came from the on-device model —
+/// everything else on this screen, including the fallback copy right next to it, is a fixed
+/// template. Matches `Narrator.Output.isTemplated`'s doc comment: surfaced, never hidden.
+struct AIGeneratedBadge: View {
+    var body: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "sparkles")
+            Text("ON-DEVICE AI")
+        }
+        .font(.caption2.weight(.bold))
+        .tracking(0.4)
+        .foregroundStyle(Theme.accent)
     }
 }
 

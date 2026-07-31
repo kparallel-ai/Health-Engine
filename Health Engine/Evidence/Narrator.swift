@@ -346,6 +346,51 @@ public enum Templates {
     }
 }
 
+// MARK: - Building model input from a Finding
+
+/// The only place a `Finding` becomes something the narrator can be asked about. Keeping this
+/// next to `Narrator` rather than inside the view layer keeps "what the model is allowed to
+/// know" auditable in one file instead of scattered across call sites.
+public enum FindingNarration {
+    public static func query(for finding: Finding, profile: UserProfile) -> RetrievalQuery {
+        let subject = Metric(rawValue: finding.subject)
+        let object = finding.object.flatMap { Metric(rawValue: $0) }
+        let subjectName = subject?.displayName ?? finding.subject
+        let objectName = object?.displayName ?? finding.object ?? "context"
+
+        // An rMSSD finding must not retrieve chunks written about SDNN, or vice versa —
+        // `Applicability.admits` hard-filters on this before ranking even runs.
+        func modality(of metric: Metric?) -> HRVModality? {
+            switch metric {
+            case .hrvRMSSDOvernight: return .rmssd
+            case .hrvSDNNOvernight:  return .sdnn
+            default:                 return nil
+            }
+        }
+        let modality = modality(of: subject) ?? modality(of: object)
+
+        return RetrievalQuery(text: "\(subjectName) and \(objectName)",
+                              age: profile.age, sex: profile.sex, modality: modality)
+    }
+
+    /// No digits are asked of the model (see `generate`'s instructions), so most of these
+    /// numerals only ever matter as a grounding safety net. What they *do* give the model is
+    /// vocabulary — the tier label and metric names it's allowed to reason with in prose.
+    public static func facts(for finding: Finding) -> FactSet {
+        var facts = FactSet()
+        let subjectName = Metric(rawValue: finding.subject)?.displayName ?? finding.subject
+        let objectName = finding.object.flatMap { Metric(rawValue: $0)?.displayName }
+            ?? finding.object ?? "context"
+        facts.add(label: "metric one", text: subjectName)
+        facts.add(label: "metric two", text: objectName)
+        facts.add(label: "evidence tier", text: finding.tier.label)
+        facts.add(label: "observations", count: finding.nObservations)
+        facts.add(label: "lag in days", count: finding.lagDays ?? 0)
+        if let effect = finding.effectSize { facts.add(label: "effect size", value: effect, unit: "", decimals: 2) }
+        return facts
+    }
+}
+
 enum CorrelationRationale {
     private static let entries: [Set<MetricFamily>: String] = [
         [.sleep, .hrv]: "Deeper, longer sleep is when parasympathetic recovery happens — the same recovery overnight HRV measures.",

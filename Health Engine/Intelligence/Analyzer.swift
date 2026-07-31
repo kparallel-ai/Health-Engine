@@ -18,6 +18,11 @@ public struct ScanFamily: Hashable, Sendable {
 
     public static let contextAssociations = ScanFamily(id: "ctx-assoc-v1",
                                                        label: "Context associations")
+    /// Constructs tested against each other rather than against calendar/location — the only
+    /// candidate pool that exists before the user has granted Tier 2 permissions, and the only
+    /// one dense enough to clear a same-day sample-size gate within the first month of use.
+    public static let biometricAssociations = ScanFamily(id: "bio-assoc-v1",
+                                                          label: "Between your own metrics")
 }
 
 public struct ScanConfig: Sendable {
@@ -38,6 +43,28 @@ public struct ScanConfig: Sendable {
     public var seed: UInt64 = 0x5EED_C0FFEE
 
     public init() {}
+
+    /// Same bootstrap, same BH correction — sample-size floor and candidate volume both change.
+    /// Calendar/location context is sparse and categorical, which is why the base config's
+    /// 60/90-day floors exist; a pair of continuous, near-daily biometric constructs reaches a
+    /// meaningful same-day N in three to four weeks, so holding it to the context floor would
+    /// just mean nothing ever surfaces in a user's first two months regardless of data quality.
+    ///
+    /// The context family's candidate pool is normally near-empty (calendar/location permission
+    /// is essentially never granted), so its 2,000-resample bootstrap had never actually run at
+    /// volume on a real device. Testing every metric against every other metric is a much larger
+    /// candidate set, and 2,000 resamples × a few hundred candidates in an unoptimized-numerics
+    /// debug build was enough to peg the CPU hard enough to make the whole app unresponsive.
+    /// `nBoot` and `lags` are cut accordingly — still a real bootstrap, just a cheaper one.
+    public static var biometricSelf: ScanConfig {
+        var c = ScanConfig()
+        c.minNSameDay = 21
+        c.minNLagged = 30
+        c.minWindowN = 15
+        c.lags = 0...1
+        c.nBoot = 400
+        return c
+    }
 }
 
 // MARK: - Tier assignment
@@ -85,10 +112,16 @@ public func assignTier(_ e: TierEvidence) -> EvidenceTier {
 
 public enum Analyzer {
 
+    /// `symmetric` is true only when `features` was built from the same metric universe as
+    /// `constructs` (the biometric self-scan) — a construct can't be tested against itself, and
+    /// a same-day pair (A,B) is the identical hypothesis as (B,A), so both get skipped. Context
+    /// associations pair two disjoint metric domains where no such collision is possible, and
+    /// stay off by default so that behaviour is unchanged.
     public static func scan(constructs: [DailyConstruct],
                             features: [ContextFeature],
                             family: ScanFamily,
-                            config: ScanConfig = ScanConfig()) -> [Finding] {
+                            config: ScanConfig = ScanConfig(),
+                            symmetric: Bool = false) -> [Finding] {
 
         // Sparse categorical events are annotations, never variables. A feature with six
         // occurrences a year cannot be tested and must not enter the family count either.
@@ -122,7 +155,9 @@ public enum Analyzer {
 
         for (construct, cSeries) in constructSeries.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
             for (feature, fSeries) in featureSeries.sorted(by: { $0.key.rawValue < $1.key.rawValue }) {
+                if symmetric && construct == feature { continue }
                 for lag in config.lags {
+                    if symmetric && lag == 0 && construct.rawValue > feature.rawValue { continue }
                     let pair = align(construct: cSeries, feature: fSeries, lag: lag, calendar: calendar)
                     guard pair.x.count >= 8 else { continue }
 

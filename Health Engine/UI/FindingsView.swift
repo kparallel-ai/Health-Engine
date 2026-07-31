@@ -8,12 +8,24 @@ import SwiftUI
 struct FindingsView: View {
     @EnvironmentObject private var services: AppServices
     @State private var findings: [Finding] = []
+    @State private var survivedCount: Int = 0
+    @State private var lastComputedAt: Date?
     @State private var verdicts: [String: String] = [:]
     @State private var familySize: Int = 0
+    @State private var showingScan = false
 
     var body: some View {
         NavigationStack {
             List {
+                if familySize > 0 {
+                    Section {
+                        testSummary
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                }
+
                 if findings.isEmpty {
                     Section {
                         Text("""
@@ -33,34 +45,92 @@ struct FindingsView: View {
                         .listRowBackground(Theme.surfaceRaised)
                     }
                 }
-
-                if familySize > 0 {
-                    Section {
-                        Text("""
-                             \(familySize) hypotheses were tested and corrected together \
-                             (Benjamini–Hochberg, q = 0.10). \(findings.count) survived.
-                             """)
-                            .font(.caption).foregroundStyle(Theme.textSecondary)
-                    } header: {
-                        Text("How many tests ran")
-                    }
-                    .listRowBackground(Theme.surfaceRaised)
-                }
             }
             .scrollContentBackground(.hidden)
             .pageBackground()
-            .navigationTitle("Findings")
+            .navigationTitle(findings.isEmpty ? "Findings" : "Findings · \(findings.count)")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showingScan = true
+                    } label: {
+                        Label("Update Insights", systemImage: "arrow.clockwise")
+                    }
+                    .tint(Theme.accent)
+                }
+            }
+            .sheet(isPresented: $showingScan) {
+                InsightsScanView(lastComputedAt: lastComputedAt)
+            }
             .task { reload() }
             .onReceive(services.recompute.$lastCompleted.compactMap { $0 }) { _ in reload() }
         }
         .tint(Theme.accent)
     }
 
+    /// What used to be a small caption buried at the bottom of the list — the actual headline
+    /// number ("how many tests ran, how many survived") belongs at the top, not as a footnote.
+    private var testSummary: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 24) {
+                statBlock(value: "\(familySize)", label: "Tested")
+                statBlock(value: "\(survivedCount)", label: "Survived")
+            }
+            if survivedCount != findings.count {
+                Text("""
+                     Showing \(findings.count) distinct relationships — repeats of the same \
+                     pair at a different lag are collapsed to their strongest result.
+                     """)
+                    .font(.caption2).foregroundStyle(Theme.textSecondary)
+            } else {
+                Text("Corrected together via Benjamini–Hochberg, q = 0.10.")
+                    .font(.caption2).foregroundStyle(Theme.textSecondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle(padding: 16)
+    }
+
+    private func statBlock(value: String, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value).font(.title.weight(.bold).monospacedDigit()).foregroundStyle(Theme.textPrimary)
+            Text(label).font(.caption).foregroundStyle(Theme.textSecondary)
+        }
+    }
+
     private func reload() {
-        findings = (try? services.store.surfacedFindings()) ?? []
+        let all = (try? services.store.surfacedFindings()) ?? []
+        survivedCount = all.count
+        lastComputedAt = all.map(\.computedAt).max()
+        findings = FindingsView.dedupedByPair(all)
         verdicts = (try? services.store.verdicts()) ?? [:]
-        familySize = findings.first?.familySize
-            ?? ((try? services.store.familySize(ScanFamily.contextAssociations.id)) ?? 0)
+        // Two independently BH-corrected families now feed this screen (context associations,
+        // which need calendar/location permission and months of history, and associations
+        // between the app's own metrics, which don't) — "tested" has to count both.
+        let contextSize = (try? services.store.familySize(ScanFamily.contextAssociations.id)) ?? 0
+        let biometricSize = (try? services.store.familySize(ScanFamily.biometricAssociations.id)) ?? 0
+        familySize = contextSize + biometricSize
+    }
+
+    /// Same two metrics tested at lag 0 vs. lag 1, or in both directions, read to a user as
+    /// "the same finding again" — statistically distinct hypotheses, but not distinct enough
+    /// to be worth scrolling past three times. Keep only the strongest result per unordered
+    /// metric pair; the BH correction and "Tested" count upstream are untouched by this —
+    /// it only changes what's *displayed*.
+    static func dedupedByPair(_ all: [Finding]) -> [Finding] {
+        var best: [String: Finding] = [:]
+        for f in all {
+            let key = [f.subject, f.object ?? ""].sorted().joined(separator: "|")
+            if let existing = best[key], !isStronger(f, than: existing) { continue }
+            best[key] = f
+        }
+        return best.values.sorted { isStronger($0, than: $1) }
+    }
+
+    private static func isStronger(_ a: Finding, than b: Finding) -> Bool {
+        if a.tier != b.tier { return a.tier > b.tier }
+        return abs(a.effectSize ?? 0) > abs(b.effectSize ?? 0)
     }
 
     @ViewBuilder
@@ -91,9 +161,26 @@ struct FindingsView: View {
 struct FindingRow: View {
     let finding: Finding
 
+    /// Which candidate pool this came from — context associations require calendar/location
+    /// permission and months of data; biometric ones don't, so the two read very differently
+    /// in terms of how much to trust them being available at all.
+    private var familyLabel: String? {
+        if finding.familyID == ScanFamily.biometricAssociations.id { return "Between your own metrics" }
+        if finding.familyID == ScanFamily.contextAssociations.id { return "Context" }
+        return nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            TierBadge(tier: finding.tier)
+            HStack(spacing: 8) {
+                TierBadge(tier: finding.tier)
+                if let familyLabel {
+                    Text(familyLabel.uppercased())
+                        .font(.caption2.weight(.bold))
+                        .tracking(0.6)
+                        .foregroundStyle(Theme.textTertiary)
+                }
+            }
             Text(Templates.finding(finding))
                 .font(.body)
                 .foregroundStyle(Theme.textPrimary)

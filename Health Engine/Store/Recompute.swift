@@ -64,21 +64,13 @@ public final class Recompute: ObservableObject {
         phase = .idle
     }
 
-    /// Coalesces: a second call while running is ignored rather than queued. HealthKit
-    /// background delivery fires in bursts and each burst does not deserve its own full scan.
-    public func run(profile: UserProfile,
-                    heartRateProvider: @escaping @Sendable (Date, Date) async throws -> [HeartRateSample],
-                    sleepProvider: @escaping @Sendable (Date, Date) async throws -> [SleepSession],
-                    contextProvider: @escaping @Sendable (DayBoundary) -> [ContextFeature]) {
+    /// Coalesces: a second call while running is ignored rather than queued.
+    private func launch(_ body: @escaping @Sendable () async throws -> Void) {
         guard !isRunning else { return }
-
         task = Task { [weak self] in
             guard let self else { return }
             do {
-                try await self.execute(profile: profile,
-                                       heartRateProvider: heartRateProvider,
-                                       sleepProvider: sleepProvider,
-                                       contextProvider: contextProvider)
+                try await body()
             } catch is CancellationError {
                 await MainActor.run { self.phase = .idle }
             } catch {
@@ -88,15 +80,49 @@ public final class Recompute: ObservableObject {
         }
     }
 
-    private func execute(profile: UserProfile,
-                         heartRateProvider: @escaping @Sendable (Date, Date) async throws -> [HeartRateSample],
-                         sleepProvider: @escaping @Sendable (Date, Date) async throws -> [SleepSession],
-                         contextProvider: @escaping @Sendable (DayBoundary) -> [ContextFeature]) async throws {
+    /// The cheap, automatic path: today's numbers and rolling baselines only. Safe to call from
+    /// HealthKit background delivery, pull-to-refresh, or right after an import — none of those
+    /// deserve a surprise minute of background CPU. Never touches the association scan.
+    public func runDeriveOnly(profile: UserProfile,
+                              heartRateProvider: @escaping @Sendable (Date, Date) async throws -> [HeartRateSample],
+                              sleepProvider: @escaping @Sendable (Date, Date) async throws -> [SleepSession]) {
+        launch { [weak self] in
+            guard let self else { return }
+            _ = try await self.deriveAndPersist(profile: profile, heartRateProvider: heartRateProvider,
+                                                sleepProvider: sleepProvider)
+            await MainActor.run {
+                self.lastCompleted = Date()
+                self.phase = .idle
+            }
+        }
+    }
+
+    /// The expensive path — every metric tested against every other metric, and, once granted,
+    /// against calendar/location context. This is real, minutes-scale CPU work; it runs only
+    /// when the user explicitly starts it (see `InsightsScanView`), never automatically.
+    public func runFullScan(profile: UserProfile,
+                            heartRateProvider: @escaping @Sendable (Date, Date) async throws -> [HeartRateSample],
+                            sleepProvider: @escaping @Sendable (Date, Date) async throws -> [SleepSession],
+                            contextProvider: @escaping @Sendable (DayBoundary) -> [ContextFeature]) {
+        launch { [weak self] in
+            guard let self else { return }
+            try await self.executeFullScan(profile: profile, heartRateProvider: heartRateProvider,
+                                           sleepProvider: sleepProvider, contextProvider: contextProvider)
+        }
+    }
+
+    /// Shared by both entry points. Loads observations, derives constructs and baselines off
+    /// the main actor, persists them, and returns the constructs plus the sleep-derived day
+    /// boundary the scan path needs for joining context.
+    private func deriveAndPersist(profile: UserProfile,
+                                  heartRateProvider: @escaping @Sendable (Date, Date) async throws -> [HeartRateSample],
+                                  sleepProvider: @escaping @Sendable (Date, Date) async throws -> [SleepSession])
+        async throws -> (constructs: [DailyConstruct], boundary: DayBoundary) {
 
         phase = .loading
         guard let range = try db.observationDateRange() else {
             phase = .idle
-            return
+            return ([], DayBoundary(sleepSessions: [], calendar: calendar))
         }
 
         var observations: [Observation] = []
@@ -123,6 +149,19 @@ public final class Recompute: ObservableObject {
         phase = .deriving(1.0)
         try db.replace(constructs: constructs)
 
+        return (constructs, boundary)
+    }
+
+    private func executeFullScan(profile: UserProfile,
+                                 heartRateProvider: @escaping @Sendable (Date, Date) async throws -> [HeartRateSample],
+                                 sleepProvider: @escaping @Sendable (Date, Date) async throws -> [SleepSession],
+                                 contextProvider: @escaping @Sendable (DayBoundary) -> [ContextFeature]) async throws {
+
+        let (constructs, boundary) = try await deriveAndPersist(profile: profile,
+                                                                 heartRateProvider: heartRateProvider,
+                                                                 sleepProvider: sleepProvider)
+        guard !constructs.isEmpty else { phase = .idle; return }
+
         phase = .joiningContext
         let features = contextProvider(boundary)
         if !features.isEmpty { try db.replace(features: features) }
@@ -132,18 +171,40 @@ public final class Recompute: ObservableObject {
 
         let storedFeatures = try db.features(version: IngestVersion.eventKit)
             + db.features(version: IngestVersion.location)
-        let family = ScanFamily.contextAssociations
+        let contextFamily = ScanFamily.contextAssociations
 
-        // 365 × 25 × 20 × 4 × 2,000 is real work. Detached, cancellable, never on the main actor.
-        let findings = await Task.detached(priority: .utility) {
-            Analyzer.scan(constructs: constructs, features: storedFeatures, family: family)
+        // Calendar/location permission is never requested anywhere in the app today, so
+        // `storedFeatures` is routinely empty and the context scan alone would leave this
+        // screen permanently blank. Building a second feature set out of the constructs
+        // themselves gives the analyzer a real, already-populated candidate pool — sleep vs.
+        // next-day HRV, stress vs. body battery, and so on — gated by the same bootstrap/BH/tier
+        // machinery, just with a same-day-count floor calibrated for dense biometric pairs
+        // instead of sparse calendar/location ones (see `ScanConfig.biometricSelf`).
+        let selfFeatures: [ContextFeature] = constructs.compactMap { c in
+            guard let v = c.value else { return nil }
+            return ContextFeature(day: c.day, feature: c.construct, value: v, isDense: true,
+                                  source: .healthkit, deriveVersion: DeriveVersion.current)
+        }
+        let biometricFamily = ScanFamily.biometricAssociations
+
+        // 365 × 25 × 20 × 4 × 2,000 is real work. Detached, cancellable, never on the main actor,
+        // and deliberately `.background` priority — not `.utility` — so a heavy scan degrades
+        // gracefully instead of contending with the UI thread for CPU time.
+        let (contextFindings, biometricFindings) = await Task.detached(priority: .background) {
+            let context = Analyzer.scan(constructs: constructs, features: storedFeatures,
+                                        family: contextFamily)
+            let biometric = Analyzer.scan(constructs: constructs, features: selfFeatures,
+                                          family: biometricFamily, config: .biometricSelf,
+                                          symmetric: true)
+            return (context, biometric)
         }.value
 
         try Task.checkCancellation()
         phase = .persisting
-        try db.replace(findings: findings, familyID: family.id)
+        try db.replace(findings: contextFindings, familyID: contextFamily.id)
+        try db.replace(findings: biometricFindings, familyID: biometricFamily.id)
 
-        lastOutputHash = Recompute.outputHash(findings)
+        lastOutputHash = Recompute.outputHash(contextFindings + biometricFindings)
         lastCompleted = Date()
         phase = .idle
     }

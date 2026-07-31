@@ -129,6 +129,30 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .enduranceScore:          return "Endurance Score"
         }
     }
+
+    /// SF Symbol used as the small badge icon on cards — purely decorative, no epistemic weight.
+    public var symbolName: String {
+        switch self {
+        case .hrResting:                                    return "heart.fill"
+        case .hrvSDNNOvernight, .hrvRMSSDOvernight,
+             .hrvStatusGarmin:                                return "waveform.path.ecg"
+        case .vo2maxRunning:                                return "lungs.fill"
+        case .sleepDuration, .sleepEfficiency, .sleepDeep,
+             .sleepREM, .sleepOnset:                          return "moon.zzz.fill"
+        case .respirationAvgOvernight:                      return "wind"
+        case .tempWristDeviation:                           return "thermometer.medium"
+        case .loadStrainTrimp, .loadTrainingGarmin:          return "flame.fill"
+        case .ctxMeetingHours, .ctxFirstEventHour,
+             .ctxLastEventHour:                               return "calendar"
+        case .ctxMinutesOutsideHome:                        return "figure.walk"
+        case .ctxTimezoneShift:                             return "globe"
+        case .bodyBatteryMin, .bodyBatteryMax:               return "battery.75"
+        case .stressAvg:                                    return "brain.head.profile"
+        case .spo2AvgOvernight:                             return "drop.fill"
+        case .thresholdLactateHR:                           return "bolt.heart.fill"
+        case .enduranceScore:                               return "figure.run"
+        }
+    }
 }
 
 public enum Source: String, Codable, Sendable {

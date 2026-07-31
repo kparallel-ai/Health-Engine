@@ -67,8 +67,24 @@ final class AppServices: ObservableObject {
         tier = t
     }
 
+    /// Cheap and automatic — today's numbers and rolling baselines only. Safe to call from
+    /// background HealthKit delivery, pull-to-refresh, or right after an import. Never runs
+    /// the association scan; that is a real, user-visible wait the person has to opt into.
     func triggerRecompute() {
-        recompute.run(
+        recompute.runDeriveOnly(
+            profile: profile,
+            heartRateProvider: { [healthKit] from, to in
+                try await healthKit.heartRateSamples(from: from, to: to)
+            },
+            sleepProvider: { [healthKit] from, to in
+                try await healthKit.sleepSessions(from: from, to: to)
+            })
+    }
+
+    /// The expensive path. Called only from the explicit "start scan" action on
+    /// `InsightsScanView` — never automatically.
+    func triggerFullScan() {
+        recompute.runFullScan(
             profile: profile,
             heartRateProvider: { [healthKit] from, to in
                 try await healthKit.heartRateSamples(from: from, to: to)
@@ -87,17 +103,37 @@ struct RootView: View {
     @EnvironmentObject private var services: AppServices
 
     init() {
-        let appearance = UITabBarAppearance()
-        appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = UIColor(Theme.surfaceRaised)
-        UITabBar.appearance().standardAppearance = appearance
-        UITabBar.appearance().scrollEdgeAppearance = appearance
+        let tabAppearance = UITabBarAppearance()
+        tabAppearance.configureWithOpaqueBackground()
+        tabAppearance.backgroundColor = UIColor(Theme.surfaceRaised)
+        tabAppearance.shadowColor = UIColor(Theme.hairline)
+        UITabBar.appearance().standardAppearance = tabAppearance
+        UITabBar.appearance().scrollEdgeAppearance = tabAppearance
 
-        let nav = UINavigationBarAppearance()
-        nav.configureWithOpaqueBackground()
-        nav.backgroundColor = UIColor(Theme.background)
-        UINavigationBar.appearance().standardAppearance = nav
-        UINavigationBar.appearance().scrollEdgeAppearance = nav
+        let titleColor = UIColor(Theme.textPrimary)
+        let largeTitleFont = UIFont.systemFont(ofSize: 32, weight: .bold)
+
+        // Two distinct states, not one: transparent and blended with the page while at the
+        // top of a scroll (so the big title reads as part of the content), opaque with a
+        // hairline shadow once scrolled (so the header stays legible over moving content).
+        // A flat single appearance is what made every screen feel titleless — cream-on-cream
+        // with no separation at all.
+        let scrollEdge = UINavigationBarAppearance()
+        scrollEdge.configureWithTransparentBackground()
+        scrollEdge.backgroundColor = UIColor(Theme.background)
+        scrollEdge.titleTextAttributes = [.foregroundColor: titleColor]
+        scrollEdge.largeTitleTextAttributes = [.foregroundColor: titleColor, .font: largeTitleFont]
+
+        let standard = UINavigationBarAppearance()
+        standard.configureWithOpaqueBackground()
+        standard.backgroundColor = UIColor(Theme.surfaceRaised)
+        standard.shadowColor = UIColor(Theme.hairline)
+        standard.titleTextAttributes = [.foregroundColor: titleColor]
+        standard.largeTitleTextAttributes = [.foregroundColor: titleColor, .font: largeTitleFont]
+
+        UINavigationBar.appearance().standardAppearance = standard
+        UINavigationBar.appearance().scrollEdgeAppearance = scrollEdge
+        UINavigationBar.appearance().compactAppearance = standard
     }
 
     var body: some View {

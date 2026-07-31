@@ -54,7 +54,10 @@ struct ExplainerView: View {
                 .padding()
             }
             .pageBackground()
-            .navigationTitle("Learn")
+            // The tab bar already says "Learn" — the title says which of the three topics is
+            // actually open, which is the thing the tab label can't tell you.
+            .navigationTitle(selected.rawValue)
+            .navigationBarTitleDisplayMode(.large)
             .onAppear { selected = focus }
         }
         .tint(Theme.accent)

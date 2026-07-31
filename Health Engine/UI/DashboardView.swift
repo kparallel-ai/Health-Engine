@@ -11,7 +11,21 @@ struct DashboardView: View {
     @StateObject private var model: DashboardViewModel
     @State private var showingGarminImporter = false
     @State private var garminImportResult: String?
-    @State private var quickLook: ConstructPick?
+
+    /// The metric currently "popped out" in place. Nil means the grid is flat.
+    @State private var expandedConstruct: DailyConstruct?
+
+    private static let dateHeaderFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEEEMMMd")
+        return f
+    }()
+
+    /// The nav title is the actual date, not the word "Today" — the tab bar already says
+    /// "Today"; repeating it in the header carries no information the tab didn't already give.
+    private var dateHeader: String {
+        Self.dateHeaderFormatter.string(from: Date())
+    }
 
     init() {
         // Replaced in .task with the real store; this keeps the initialiser total.
@@ -19,56 +33,86 @@ struct DashboardView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    if services.recompute.isRunning { progressBanner }
+        ZStack {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if services.recompute.isRunning { progressBanner }
 
-                    if model.dayCount == 0 {
-                        EmptyStateView(tier: services.tier)
-                    } else {
-                        summaryCard
-                        constructGrid
-                        if model.dayCount < ScanConfig().minNSameDay {
-                            UnlockTimeline(unlocks: model.unlocks(currentTier: services.tier),
-                                           tier: services.tier)
+                        if model.dayCount == 0 {
+                            EmptyStateView(tier: services.tier)
+                        } else {
+                            summaryCard
+                            VStack(alignment: .leading, spacing: 10) {
+                                SectionHeader(title: "Your Metrics · \(model.today.count) tracked")
+                                constructGrid
+                            }
+                            if model.dayCount < ScanConfig().minNSameDay {
+                                UnlockTimeline(unlocks: model.unlocks(currentTier: services.tier),
+                                               tier: services.tier)
+                            }
+                            if !model.findings.isEmpty { findingsPreview }
                         }
-                        if !model.findings.isEmpty { findingsPreview }
+                    }
+                    .padding()
+                    .animation(.spring(duration: 0.35), value: model.dayCount)
+                }
+                .pageBackground()
+                .navigationTitle(dateHeader)
+                .navigationBarTitleDisplayMode(.large)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        // Tier 3 is optional and never gates anything else — this is the one
+                        // affordance for it, reachable regardless of current tier or history length.
+                        Button {
+                            showingGarminImporter = true
+                        } label: {
+                            Label("Import Garmin Data", systemImage: "square.and.arrow.down")
+                        }
+                        .tint(Theme.accent)
                     }
                 }
-                .padding()
-                .animation(.spring(duration: 0.35), value: model.dayCount)
-            }
-            .pageBackground()
-            .navigationTitle("Today")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    // Tier 3 is optional and never gates anything else — this is the one
-                    // affordance for it, reachable regardless of current tier or history length.
-                    Button {
-                        showingGarminImporter = true
-                    } label: {
-                        Label("Import Garmin Data", systemImage: "square.and.arrow.down")
-                    }
-                    .tint(Theme.accent)
+                .fileImporter(isPresented: $showingGarminImporter,
+                             allowedContentTypes: [.zip, .json, .commaSeparatedText]) { result in
+                    handleGarminImport(result)
                 }
+                .alert("Garmin Import", isPresented: .constant(garminImportResult != nil),
+                      presenting: garminImportResult) { _ in
+                    Button("OK") { garminImportResult = nil }
+                } message: { Text($0) }
+                .refreshable { services.triggerRecompute(); model.reload() }
+                .task { model.attach(store: services.store); model.reload() }
+                .onReceive(services.recompute.$lastCompleted.compactMap { $0 }) { _ in model.reload() }
             }
-            .fileImporter(isPresented: $showingGarminImporter,
-                         allowedContentTypes: [.zip, .json, .commaSeparatedText]) { result in
-                handleGarminImport(result)
+
+            if let construct = expandedConstruct {
+                Color.black.opacity(0.32)
+                    .ignoresSafeArea()
+                    .onTapGesture { closeExpanded() }
+                    .transition(.opacity)
+
+                ExpandedMetricCard(construct: construct, store: services.store, onClose: closeExpanded)
+                    .padding(.horizontal, 20)
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.85, anchor: .center).combined(with: .opacity),
+                        removal: .scale(scale: 0.92, anchor: .center).combined(with: .opacity)))
             }
-            .alert("Garmin Import", isPresented: .constant(garminImportResult != nil),
-                  presenting: garminImportResult) { _ in
-                Button("OK") { garminImportResult = nil }
-            } message: { Text($0) }
-            .sheet(item: $quickLook) { pick in
-                MetricQuickLookView(construct: pick.construct, store: services.store)
-            }
-            .refreshable { services.triggerRecompute(); model.reload() }
-            .task { model.attach(store: services.store); model.reload() }
-            .onReceive(services.recompute.$lastCompleted.compactMap { $0 }) { _ in model.reload() }
         }
         .tint(Theme.accent)
+    }
+
+    // A snappy, low-overshoot spring: transform-only (scale + opacity), never frame/size, so
+    // the compositor animates it directly instead of re-running layout every frame. The earlier
+    // matchedGeometryEffect version morphed the card's actual frame across two separate view
+    // trees inside a LazyVGrid/ScrollView — correct in principle, but SwiftUI re-solves layout
+    // and re-rasterizes both trees' shadows on every frame of that animation, which is what
+    // read as choppy on device.
+    private static let popAnimation = Animation.spring(response: 0.32, dampingFraction: 0.88)
+
+    private func closeExpanded() {
+        withAnimation(Self.popAnimation) {
+            expandedConstruct = nil
+        }
     }
 
     private func handleGarminImport(_ result: Result<URL, Error>) {
@@ -97,12 +141,22 @@ struct DashboardView: View {
     }
 
     private var summaryCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(model.summary)
-                .font(.title3.weight(.semibold))
-                .foregroundStyle(Theme.textPrimary)
-            Text("\(model.dayCount) days of history · tier \(services.tier)")
-                .font(.caption).foregroundStyle(Theme.textSecondary)
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                Circle().fill(Theme.accentGradient)
+                Image(systemName: "sparkles")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 34, height: 34)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(model.summary)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                Text("\(model.dayCount) days of history · tier \(services.tier)")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .cardStyle(padding: 16)
@@ -111,31 +165,31 @@ struct DashboardView: View {
     private var constructGrid: some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
             ForEach(model.today, id: \.construct) { construct in
+                let isExpanding = expandedConstruct?.construct == construct.construct
                 Button {
-                    quickLook = ConstructPick(construct: construct)
+                    withAnimation(Self.popAnimation) {
+                        expandedConstruct = construct
+                    }
                 } label: {
                     ConstructCard(construct: construct)
+                        // A cheap opacity cue that "this one is open" — no frame matching,
+                        // so it costs nothing during the popup's own animation.
+                        .opacity(isExpanding ? 0.45 : 1)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressableCardStyle())
             }
         }
     }
 
     private var findingsPreview: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Findings").font(.headline).foregroundStyle(Theme.textPrimary)
+            SectionHeader(title: "Findings · \(model.findings.count) surfaced")
             ForEach(model.findings.prefix(3)) { finding in
                 FindingRow(finding: finding)
                     .cardStyle()
             }
         }
     }
-}
-
-/// Wraps a `DailyConstruct` for `.sheet(item:)`, which needs `Identifiable`.
-private struct ConstructPick: Identifiable {
-    let construct: DailyConstruct
-    var id: String { construct.construct.rawValue }
 }
 
 // MARK: - Construct card
@@ -148,9 +202,19 @@ struct ConstructCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(construct.construct.displayName)
-                .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                ZStack {
+                    Circle().fill(Theme.accentSoft)
+                    Image(systemName: construct.construct.symbolName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                }
+                .frame(width: 20, height: 20)
+
+                Text(construct.construct.displayName)
+                    .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(1)
+            }
 
             // Today's reading if there is one; otherwise the baseline, ghosted, so the card
             // never goes blank just because nothing was measured yet today. It is never
@@ -209,7 +273,7 @@ struct BaselineBand: View {
                 Capsule().fill(Theme.accentSoft)
                     .frame(width: geo.size.width / 3, height: 4)
                     .offset(x: geo.size.width / 3)
-                Circle().fill(Theme.accent)
+                Circle().fill(Theme.accentGradient)
                     .frame(width: 7, height: 7)
                     .offset(x: max(0, min(position - 3.5, geo.size.width - 7)))
             }
@@ -219,62 +283,87 @@ struct BaselineBand: View {
     }
 }
 
-// MARK: - Metric quick look
+// MARK: - Metric expand-in-place
 
-/// The "little pop-up" — tapping a card shouldn't require a full screen just to see today
-/// against the baseline. A link to the real history chart is one tap further, not the default.
-struct MetricQuickLookView: View {
+/// Replaces the old bottom-sheet quick look. Tapping a card pops this view up in place — a
+/// scale-and-fade grow, the iOS "force touch" cue — rather than an unrelated sheet sliding up
+/// from the bottom.
+struct ExpandedMetricCard: View {
     let construct: DailyConstruct
     let store: Store
+    let onClose: () -> Void
 
-    @Environment(\.dismiss) private var dismiss
+    @State private var showHistory = false
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 24) {
-                HStack(spacing: 0) {
-                    quickStat(label: "Today",
-                             value: construct.value.map { DashboardViewModel.formatValue($0, for: construct.construct) },
-                             emphasis: true)
-                    Divider().frame(height: 44)
-                    quickStat(label: "Baseline",
-                             value: construct.baseline.map { DashboardViewModel.formatValue($0, for: construct.construct) },
-                             emphasis: false)
-                }
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .top) {
+                HStack(spacing: 8) {
+                    ZStack {
+                        Circle().fill(Theme.accentGradient)
+                        Image(systemName: construct.construct.symbolName)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                    }
+                    .frame(width: 30, height: 30)
 
-                if let label = DashboardViewModel.deviationLabel(construct) {
-                    Text(label)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(Theme.accent)
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(Theme.accentSoft, in: Capsule())
+                    Text(construct.construct.displayName)
+                        .font(.headline)
+                        .foregroundStyle(Theme.textPrimary)
                 }
-
-                NavigationLink {
-                    MetricDetailView(metric: construct.construct, store: store)
-                } label: {
-                    Label("View full history", systemImage: "chart.xyaxis.line")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.accent)
-
                 Spacer()
-            }
-            .padding(24)
-            .padding(.top, 8)
-            .pageBackground()
-            .navigationTitle(construct.construct.displayName)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title2)
+                        .foregroundStyle(Theme.textTertiary)
                 }
             }
+
+            HStack(spacing: 0) {
+                quickStat(label: "Today",
+                         value: construct.value.map { DashboardViewModel.formatValue($0, for: construct.construct) },
+                         emphasis: true)
+                Divider().frame(height: 44)
+                quickStat(label: "Baseline",
+                         value: construct.baseline.map { DashboardViewModel.formatValue($0, for: construct.construct) },
+                         emphasis: false)
+            }
+
+            if let label = DashboardViewModel.deviationLabel(construct) {
+                Text(label)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Theme.accentSoft, in: Capsule())
+            }
+
+            Button {
+                showHistory = true
+            } label: {
+                Label("View full history", systemImage: "chart.xyaxis.line")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accent)
         }
-        .tint(Theme.accent)
-        .presentationDetents([.height(340), .medium])
-        .presentationDragIndicator(.visible)
+        .padding(22)
+        .background(Theme.surfaceRaised, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Theme.hairline.opacity(0.6), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.20), radius: 28, x: 0, y: 14)
+        .fullScreenCover(isPresented: $showHistory) {
+            NavigationStack {
+                MetricDetailView(metric: construct.construct, store: store)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Close") { showHistory = false }
+                        }
+                    }
+            }
+            .tint(Theme.accent)
+        }
     }
 
     private func quickStat(label: String, value: String?, emphasis: Bool) -> some View {

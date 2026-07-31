@@ -13,6 +13,42 @@ struct MetricDetailView: View {
 
     private var withValues: [DailyConstruct] { series.filter { $0.value != nil } }
 
+    /// Charts needs a real `Date` to lay out and format a time axis. `Day.raw` is a
+    /// `"YYYY-MM-DD"` string (see `Day`'s own doc comment: "Not a Date") — plotting it directly
+    /// as the x-value made Charts treat every day as a nominal category and print the raw ISO
+    /// string as the axis label, which is what actually made this chart hard to read.
+    private func date(for c: DailyConstruct) -> Date {
+        c.day.date(in: .current) ?? Date()
+    }
+
+    private var averageBaseline: Double? {
+        let baselines = withValues.compactMap { $0.confidence > 0 ? $0.baseline : nil }
+        guard !baselines.isEmpty else { return nil }
+        return baselines.reduce(0, +) / Double(baselines.count)
+    }
+
+    private struct HistogramBin: Identifiable {
+        let id = UUID()
+        let midpoint: Double
+        let count: Int
+    }
+
+    /// A real histogram — equal-width bins over the observed range — rather than one bar per
+    /// distinct raw value, which produced a chaotic comb of near-duplicate bars.
+    private var histogram: [HistogramBin] {
+        let values = withValues.compactMap(\.value)
+        guard let lo = values.min(), let hi = values.max() else { return [] }
+        guard hi > lo else { return [HistogramBin(midpoint: lo, count: values.count)] }
+        let binCount = min(8, max(4, values.count / 3))
+        let width = (hi - lo) / Double(binCount)
+        var counts = Array(repeating: 0, count: binCount)
+        for v in values {
+            let idx = min(binCount - 1, max(0, Int((v - lo) / width)))
+            counts[idx] += 1
+        }
+        return counts.enumerated().map { HistogramBin(midpoint: lo + width * (Double($0) + 0.5), count: $1) }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -41,35 +77,51 @@ struct MetricDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Over time").font(.headline).foregroundStyle(Theme.textPrimary)
             Chart {
-                // The band is drawn from the actual robust SD, so its width carries meaning.
-                ForEach(withValues, id: \.day) { c in
-                    if let baseline = c.baseline, c.confidence > 0, let z = c.deviationZ,
-                       let value = c.value, z != 0 {
-                        let sd = abs(value - baseline) / abs(z)
-                        AreaMark(x: .value("Day", c.day.raw),
-                                 yStart: .value("Low", baseline - sd),
-                                 yEnd: .value("High", baseline + sd))
-                            .foregroundStyle(Theme.accent.opacity(0.14))
-                    }
+                if let baseline = averageBaseline {
+                    RuleMark(y: .value("Baseline", baseline))
+                        .foregroundStyle(Theme.textTertiary)
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [5, 4]))
                 }
                 ForEach(withValues, id: \.day) { c in
-                    LineMark(x: .value("Day", c.day.raw), y: .value("Value", c.value ?? 0))
+                    LineMark(x: .value("Date", date(for: c)), y: .value("Value", c.value ?? 0))
                         .foregroundStyle(Theme.accent)
+                        .interpolationMethod(.catmullRom)
+                        .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                     // Ghosted where the baseline gate has not opened — visibly not the same
                     // epistemic status as the rest of the line.
                     if c.confidence == 0 {
-                        PointMark(x: .value("Day", c.day.raw), y: .value("Value", c.value ?? 0))
+                        PointMark(x: .value("Date", date(for: c)), y: .value("Value", c.value ?? 0))
                             .foregroundStyle(Theme.textTertiary)
-                            .symbolSize(20)
+                            .symbolSize(18)
                     }
                 }
+                if let last = withValues.last {
+                    PointMark(x: .value("Date", date(for: last)), y: .value("Value", last.value ?? 0))
+                        .foregroundStyle(Theme.accent)
+                        .symbolSize(50)
+                }
             }
-            .chartXAxis { AxisMarks(values: .automatic(desiredCount: 4)) }
-            .frame(height: 220)
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine().foregroundStyle(Theme.hairline.opacity(0.7))
+                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine().foregroundStyle(Theme.hairline.opacity(0.5))
+                    AxisValueLabel().font(.caption2).foregroundStyle(Theme.textSecondary)
+                }
+            }
+            .frame(height: 200)
 
-            Label("Shaded band is one robust SD of your own rolling baseline.",
-                  systemImage: "info.circle")
-                .font(.caption).foregroundStyle(Theme.textSecondary)
+            if averageBaseline != nil {
+                Label("Dashed line is your rolling baseline over this period.",
+                      systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+            }
         }
         .cardStyle(padding: 16)
     }
@@ -79,9 +131,15 @@ struct MetricDetailView: View {
     private var distribution: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Distribution").font(.headline).foregroundStyle(Theme.textPrimary)
-            Chart(withValues, id: \.day) { c in
-                BarMark(x: .value(metric.displayName, c.value ?? 0))
-                    .foregroundStyle(Theme.accent.opacity(0.6))
+            Chart(histogram) { bin in
+                BarMark(x: .value(metric.displayName, bin.midpoint), y: .value("Days", bin.count))
+                    .foregroundStyle(Theme.accent.gradient)
+                    .cornerRadius(4)
+            }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                    AxisValueLabel().font(.caption2).foregroundStyle(Theme.textSecondary)
+                }
             }
             .chartYAxis(.hidden)
             .frame(height: 120)
@@ -124,7 +182,10 @@ struct MetricDetailView: View {
             ExplainerView(focus: ExplainerTopic.forMetric(metric))
         } label: {
             Label("What \(metric.displayName.lowercased()) actually measures", systemImage: "book")
+                .foregroundStyle(Theme.accent)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .cardStyle(padding: 14)
     }
 }
 

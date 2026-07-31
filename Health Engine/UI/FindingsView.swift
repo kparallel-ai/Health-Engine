@@ -20,8 +20,9 @@ struct FindingsView: View {
                              No associations have cleared the evidence gates yet. That is the \
                              expected state early on — most tested patterns never should.
                              """)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.textSecondary)
                     }
+                    .listRowBackground(Theme.surfaceRaised)
                 } else {
                     ForEach(findings) { finding in
                         Section {
@@ -29,6 +30,7 @@ struct FindingsView: View {
                             FindingStats(finding: finding)
                             verdictButtons(for: finding)
                         }
+                        .listRowBackground(Theme.surfaceRaised)
                     }
                 }
 
@@ -38,16 +40,20 @@ struct FindingsView: View {
                              \(familySize) hypotheses were tested and corrected together \
                              (Benjamini–Hochberg, q = 0.10). \(findings.count) survived.
                              """)
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(Theme.textSecondary)
                     } header: {
                         Text("How many tests ran")
                     }
+                    .listRowBackground(Theme.surfaceRaised)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .pageBackground()
             .navigationTitle("Findings")
             .task { reload() }
             .onReceive(services.recompute.$lastCompleted.compactMap { $0 }) { _ in reload() }
         }
+        .tint(Theme.accent)
     }
 
     private func reload() {
@@ -63,7 +69,7 @@ struct FindingsView: View {
             if let verdict = verdicts[finding.id] {
                 Label(verdict == "confirmed" ? "You confirmed this" : "You dismissed this",
                       systemImage: verdict == "confirmed" ? "hand.thumbsup.fill" : "hand.thumbsdown.fill")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
             } else {
                 Button("Rings true") { record(finding, "confirmed") }
                 Button("Doesn't") { record(finding, "dismissed") }
@@ -71,6 +77,7 @@ struct FindingsView: View {
         }
         .font(.caption)
         .buttonStyle(.borderless)
+        .tint(Theme.accent)
     }
 
     private func record(_ finding: Finding, _ verdict: String) {
@@ -89,6 +96,7 @@ struct FindingRow: View {
             TierBadge(tier: finding.tier)
             Text(Templates.finding(finding))
                 .font(.body)
+                .foregroundStyle(Theme.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.vertical, 4)
@@ -145,7 +153,7 @@ struct FindingStats: View {
             }
             if let low = finding.effectCILow, let high = finding.effectCIHigh {
                 Text(String(format: "95%% CI %.2f to %.2f", low, high))
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(Theme.textSecondary)
             }
             if finding.tier == .t3 {
                 // SPEC §5.2. This limit is permanent and stating it is the point.
@@ -153,15 +161,15 @@ struct FindingStats: View {
                      Observational. This can't separate a direct effect from something that \
                      reliably travels with it.
                      """)
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .font(.caption2).foregroundStyle(Theme.textSecondary)
             }
         }
     }
 
     private func stat(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(label).font(.caption2).foregroundStyle(.secondary)
-            Text(value).font(.caption.monospacedDigit())
+            Text(label).font(.caption2).foregroundStyle(Theme.textSecondary)
+            Text(value).font(.caption.monospacedDigit()).foregroundStyle(Theme.textPrimary)
         }
     }
 }

@@ -96,7 +96,13 @@ public final class DashboardViewModel: ObservableObject {
 
     public static func format(_ c: DailyConstruct) -> String {
         guard let v = c.value else { return "—" }
-        switch c.construct {
+        return formatValue(v, for: c.construct)
+    }
+
+    /// Same per-metric formatting `format(_:)` uses, but for any value — chiefly the baseline,
+    /// so a card can still show *something* concrete when today itself wasn't measured.
+    public static func formatValue(_ v: Double, for metric: Metric) -> String {
+        switch metric {
         case .sleepEfficiency, .spo2AvgOvernight: return String(format: "%.0f%%", v * 100)
         case .tempWristDeviation:                 return String(format: "%+.2f °C", v)
         case .loadStrainTrimp:                    return String(format: "%.1f", v)
@@ -106,10 +112,29 @@ public final class DashboardViewModel: ObservableObject {
         }
     }
 
+    /// Percent-of-baseline reads far more plainly than standard deviations, which is what
+    /// actually drives the gates and the band width internally — this is display copy only.
+    /// Two metrics can carry a baseline near zero (a deviation-from-normal temperature, a
+    /// sleep onset that floats around midnight), where "percent of baseline" is meaningless;
+    /// those get an absolute-difference phrasing instead.
     public static func deviationLabel(_ c: DailyConstruct) -> String? {
-        guard let z = c.deviationZ, c.confidence > 0 else { return nil }
-        if abs(z) < 0.5 { return "at baseline" }
-        return String(format: "%.1f SD %@ baseline", abs(z), z > 0 ? "above" : "below")
+        guard let value = c.value, let baseline = c.baseline, c.confidence > 0 else { return nil }
+        switch c.construct {
+        case .tempWristDeviation:
+            let diff = value - baseline
+            if abs(diff) < 0.1 { return "at baseline" }
+            return String(format: "%.2f°C %@ baseline", abs(diff), diff > 0 ? "above" : "below")
+        case .sleepOnset:
+            let diff = value - baseline
+            if abs(diff) < 5 { return "at baseline" }
+            return String(format: "%.0f min %@ baseline", abs(diff),
+                         diff > 0 ? "later than" : "earlier than")
+        default:
+            guard abs(baseline) > 1e-9 else { return nil }
+            let percent = (value - baseline) / baseline * 100
+            if abs(percent) < 3 { return "at baseline" }
+            return String(format: "%.0f%% %@ baseline", abs(percent), percent > 0 ? "above" : "below")
+        }
     }
 
     /// Facts handed to the narrator. Building this is the *only* way a number reaches the model.

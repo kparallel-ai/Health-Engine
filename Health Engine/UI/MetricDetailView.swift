@@ -18,7 +18,7 @@ struct MetricDetailView: View {
             VStack(alignment: .leading, spacing: 24) {
                 if withValues.isEmpty {
                     Text("No \(metric.displayName.lowercased()) recorded yet.")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                 } else {
                     timeSeries
                     distribution
@@ -28,8 +28,10 @@ struct MetricDetailView: View {
             }
             .padding()
         }
+        .pageBackground()
         .navigationTitle(metric.displayName)
         .navigationBarTitleDisplayMode(.inline)
+        .tint(Theme.accent)
         .task { series = (try? store.constructs(version: DeriveVersion.current, construct: metric)) ?? [] }
     }
 
@@ -37,7 +39,7 @@ struct MetricDetailView: View {
 
     private var timeSeries: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Over time").font(.headline)
+            Text("Over time").font(.headline).foregroundStyle(Theme.textPrimary)
             Chart {
                 // The band is drawn from the actual robust SD, so its width carries meaning.
                 ForEach(withValues, id: \.day) { c in
@@ -47,17 +49,17 @@ struct MetricDetailView: View {
                         AreaMark(x: .value("Day", c.day.raw),
                                  yStart: .value("Low", baseline - sd),
                                  yEnd: .value("High", baseline + sd))
-                            .foregroundStyle(.tint.opacity(0.12))
+                            .foregroundStyle(Theme.accent.opacity(0.14))
                     }
                 }
                 ForEach(withValues, id: \.day) { c in
                     LineMark(x: .value("Day", c.day.raw), y: .value("Value", c.value ?? 0))
-                        .foregroundStyle(.tint)
+                        .foregroundStyle(Theme.accent)
                     // Ghosted where the baseline gate has not opened — visibly not the same
                     // epistemic status as the rest of the line.
                     if c.confidence == 0 {
                         PointMark(x: .value("Day", c.day.raw), y: .value("Value", c.value ?? 0))
-                            .foregroundStyle(.tertiary)
+                            .foregroundStyle(Theme.textTertiary)
                             .symbolSize(20)
                     }
                 }
@@ -67,22 +69,24 @@ struct MetricDetailView: View {
 
             Label("Shaded band is one robust SD of your own rolling baseline.",
                   systemImage: "info.circle")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(Theme.textSecondary)
         }
+        .cardStyle(padding: 16)
     }
 
     // MARK: - Distribution
 
     private var distribution: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Distribution").font(.headline)
+            Text("Distribution").font(.headline).foregroundStyle(Theme.textPrimary)
             Chart(withValues, id: \.day) { c in
                 BarMark(x: .value(metric.displayName, c.value ?? 0))
-                    .foregroundStyle(.tint.opacity(0.6))
+                    .foregroundStyle(Theme.accent.opacity(0.6))
             }
             .chartYAxis(.hidden)
             .frame(height: 120)
         }
+        .cardStyle(padding: 16)
     }
 
     // MARK: - Normative comparison
@@ -91,27 +95,27 @@ struct MetricDetailView: View {
     private var normativeSection: some View {
         if metric.permitsNormativePercentile {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Compared to others").font(.headline)
+                Text("Compared to others").font(.headline).foregroundStyle(Theme.textPrimary)
                 Text(Normative.description(for: metric))
-                    .font(.subheadline)
+                    .font(.subheadline).foregroundStyle(Theme.textPrimary)
                 // Every normative comparison states its reference population and method.
                 // If that sentence cannot be written, the comparison is not shown.
                 Text(Normative.reference(for: metric))
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
             }
+            .cardStyle(padding: 14)
         } else if metric == .hrvSDNNOvernight || metric == .hrvRMSSDOvernight {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Why there's no percentile here").font(.headline)
+                Text("Why there's no percentile here").font(.headline).foregroundStyle(Theme.textPrimary)
                 Text("""
                      Published HRV reference values come from short supine ECG recordings. \
                      These come from overnight wrist PPG — a different window, posture, \
                      modality and artifact profile. The two aren't comparable, so this app \
                      compares your HRV only to your own rolling baseline.
                      """)
-                    .font(.subheadline).foregroundStyle(.secondary)
+                    .font(.subheadline).foregroundStyle(Theme.textSecondary)
             }
-            .padding(14)
-            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+            .cardStyle(padding: 14)
         }
     }
 

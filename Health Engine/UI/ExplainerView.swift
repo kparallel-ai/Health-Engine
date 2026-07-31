@@ -53,9 +53,11 @@ struct ExplainerView: View {
                 }
                 .padding()
             }
+            .pageBackground()
             .navigationTitle("Learn")
             .onAppear { selected = focus }
         }
+        .tint(Theme.accent)
     }
 }
 
@@ -86,7 +88,7 @@ struct OxygenCascadeExplainer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Where the ceiling actually sits").font(.title3.weight(.semibold))
+            Text("Where the ceiling actually sits").font(.title3.weight(.semibold)).foregroundStyle(Theme.textPrimary)
 
             Canvas { context, size in
                 let stepHeight = size.height / CGFloat(stages.count)
@@ -121,7 +123,7 @@ struct OxygenCascadeExplainer: View {
                  The steepest drop is at delivery, not at intake — which is why the ceiling is \
                  usually cardiac, not pulmonary.
                  """)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textSecondary)
 
             ClaimList(claims: claims)
         }
@@ -148,7 +150,7 @@ struct AutonomicExplainer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("What rMSSD is a proxy for").font(.title3.weight(.semibold))
+            Text("What rMSSD is a proxy for").font(.title3.weight(.semibold)).foregroundStyle(Theme.textPrimary)
             AutonomicDial()
             Text("""
                  Heart rate variability is the spacing between beats, not the rate itself. \
@@ -156,7 +158,7 @@ struct AutonomicExplainer: View {
                  It is a proxy — a good one, but a proxy — and it moves for reasons that have \
                  nothing to do with training.
                  """)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textSecondary)
             ClaimList(claims: claims)
         }
     }
@@ -211,7 +213,7 @@ struct FitnessFatigueExplainer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Two curves, not one").font(.title3.weight(.semibold))
+            Text("Two curves, not one").font(.title3.weight(.semibold)).foregroundStyle(Theme.textPrimary)
             Canvas { context, size in
                 func curve(decay: Double, gain: Double, colour: Color) {
                     var path = Path()
@@ -239,7 +241,7 @@ struct FitnessFatigueExplainer: View {
                  the gap between the curves — what you can actually do on the day — often peaks \
                  well after the work was done.
                  """)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textSecondary)
 
             ClaimList(claims: claims)
         }
@@ -253,16 +255,15 @@ struct ClaimList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("What the evidence says").font(.headline)
+            Text("What the evidence says").font(.headline).foregroundStyle(Theme.textPrimary)
             ForEach(claims) { claim in
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(claim.text).font(.subheadline)
-                    Text(claim.chunkID).font(.caption2.monospaced()).foregroundStyle(.tertiary)
+                    Text(claim.text).font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text(claim.chunkID).font(.caption2.monospaced()).foregroundStyle(Theme.textTertiary)
                 }
             }
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12))
+        .cardStyle(padding: 14)
     }
 }
 

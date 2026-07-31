@@ -73,12 +73,19 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
     }
 
     /// Overnight metrics belong to the day they *precede* (Derive §physiological day).
+    ///
+    /// Garmin's daily summary (`bodyBattery`, `allDayStress`) is keyed by a `calendarDate` that
+    /// itself spans afternoon through the following pre-dawn hours — already a wake-to-wake
+    /// bucket, not a midnight-to-midnight one. Tagging these `false` sent their midnight-anchored
+    /// timestamp through the *daytime* assignment path (`day(for:)`, `mostRecentWake(atOrBefore:)`),
+    /// which resolves a midnight instant to the **previous** day's wake and silently shifted every
+    /// Garmin daily reading back by a day. `bodyBatteryMax` was already correctly `true`.
     public var isOvernight: Bool {
         switch self {
         case .hrResting, .hrvSDNNOvernight, .hrvRMSSDOvernight, .sleepDuration,
              .sleepEfficiency, .sleepDeep, .sleepREM, .sleepOnset,
              .respirationAvgOvernight, .tempWristDeviation, .spo2AvgOvernight,
-             .bodyBatteryMax:
+             .bodyBatteryMax, .bodyBatteryMin, .stressAvg:
             return true
         default:
             return false

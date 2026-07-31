@@ -86,6 +86,20 @@ final class AppServices: ObservableObject {
 struct RootView: View {
     @EnvironmentObject private var services: AppServices
 
+    init() {
+        let appearance = UITabBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = UIColor(Theme.surfaceRaised)
+        UITabBar.appearance().standardAppearance = appearance
+        UITabBar.appearance().scrollEdgeAppearance = appearance
+
+        let nav = UINavigationBarAppearance()
+        nav.configureWithOpaqueBackground()
+        nav.backgroundColor = UIColor(Theme.background)
+        UINavigationBar.appearance().standardAppearance = nav
+        UINavigationBar.appearance().scrollEdgeAppearance = nav
+    }
+
     var body: some View {
         TabView {
             DashboardView()
@@ -95,5 +109,9 @@ struct RootView: View {
             ExplainerView()
                 .tabItem { Label("Learn", systemImage: "book") }
         }
+        .tint(Theme.accent)
+        // A deliberate warm light theme, not a system-dependent default — this is the fix
+        // for "the app looks black," not merely "the app currently looks black on this phone."
+        .preferredColorScheme(.light)
     }
 }

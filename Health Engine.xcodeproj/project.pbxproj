@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1CA01B2B0877E7B6B6A82562 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 38374624718268E9CEA1B5BA /* ZIPFoundation */; };
 		4AC0DC0B5B1F0F6CDCEFCC04 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = A104F7A5A8DA169B1B0FC4DC /* GRDB */; };
 /* End PBXBuildFile section */
 
@@ -67,6 +68,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				4AC0DC0B5B1F0F6CDCEFCC04 /* GRDB in Frameworks */,
+				1CA01B2B0877E7B6B6A82562 /* ZIPFoundation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -133,6 +135,7 @@
 			name = "Health Engine";
 			packageProductDependencies = (
 				A104F7A5A8DA169B1B0FC4DC /* GRDB */,
+				38374624718268E9CEA1B5BA /* ZIPFoundation */,
 			);
 			productName = "Health Engine";
 			productReference = F625E021301A4BBB00133F4E /* Health Engine.app */;
@@ -171,6 +174,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				76C276E2BBC902F7EC05D8D9 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
+				CDFFFC86C7727A7D965CB676 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = F625E022301A4BBB00133F4E /* Products */;
@@ -492,9 +496,22 @@
 				minimumVersion = 7.0.0;
 			};
 		};
+		CDFFFC86C7727A7D965CB676 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/weichsel/ZIPFoundation";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.9.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		38374624718268E9CEA1B5BA /* ZIPFoundation */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CDFFFC86C7727A7D965CB676 /* XCRemoteSwiftPackageReference "ZIPFoundation" */;
+			productName = ZIPFoundation;
+		};
 		A104F7A5A8DA169B1B0FC4DC /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 76C276E2BBC902F7EC05D8D9 /* XCRemoteSwiftPackageReference "GRDB.swift" */;

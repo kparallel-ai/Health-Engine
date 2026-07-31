@@ -6,7 +6,8 @@ import Foundation
 
 public enum DeriveVersion {
     /// Bump on any change to the arithmetic below. Stored on every row it produces.
-    public static let current = "derive-1.0.0"
+    /// 1.0.1: fixed day assignment for body_battery.min and stress.avg (see Metric.isOvernight).
+    public static let current = "derive-1.0.1"
 }
 
 // MARK: - Inputs that are not Observations

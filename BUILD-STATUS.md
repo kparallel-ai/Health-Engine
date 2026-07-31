@@ -5,16 +5,16 @@ Against `BUILD-APP.md`. Swift only, no network calls, no networking entitlement.
 | Task | State | Notes |
 |---|---|---|
 | A1 Store | done | GRDB migrations, append-only, dedup index, `INSERT OR IGNORE` so re-import adds zero rows |
-| A2 HealthKit | done | Anchored queries, background delivery, sleep-stage collapse, denied reads return empty rather than throwing |
-| A3 Context | done | EventKit merged-interval hours, all-day excluded, CoreLocation significant-change only, home inferred from overnight clustering |
-| A4 Garmin import | done | CSV + JSON, deterministic `source_id`, single transaction, unmapped fields counted and surfaced |
-| A5 Derive | done | Physiological day boundary, n=14 baseline gate, 21-day vendor suppression, TRIMP with 60 s delta cap |
+| A2 HealthKit | done | Anchored queries, background delivery, sleep-stage collapse, denied reads return empty rather than throwing. Free/Personal Team signing confirmed to support the capability — see Xcode project notes below. |
+| A3 Context | done | EventKit merged-interval hours, all-day excluded, CoreLocation significant-change only, home inferred from overnight clustering. **Neither permission is ever requested from the UI today** — see "Not yet wired." |
+| A4 Garmin import | done | CSV + JSON, **plus real GDPR zip exports** — nested `DI_CONNECT/.../UDSFile_*.json` and `*_sleepData.json`, parsed via ZIPFoundation. Deterministic `source_id`, single transaction, unmapped fields counted and surfaced. Validated end-to-end against a real 3.2 MB export. |
+| A5 Derive | done | Physiological day boundary, n=14 baseline gate, 21-day vendor suppression, TRIMP with 60 s delta cap. `derive-1.0.1`: fixed `bodyBatteryMin`/`stressAvg` incorrectly marked non-overnight, which shifted every Garmin daily reading back one day. |
 | A6 Stats | done | **See the deviation below.** SplitMix64, ACF, τ-based block length, MBB, BH-FDR |
-| A7 Analyzer | done | Family bookkeeping exact, effect floor, N gates, tier ladder as a pure function |
-| A8 Recompute | done | Detached CPU work, phased progress, cancellable, output hash for reproducibility checks |
-| A9 Dashboard | done | Designed 0-day and mid-history states computed from the real gates |
-| A10 Metric detail | done | Baseline band drawn at actual robust SD; HRV percentile blocked by `Metric.permitsNormativePercentile` |
-| A11 Findings | done | Tier badges differ in colour, icon *and* wording; family size shown |
+| A7 Analyzer | done | Family bookkeeping exact, effect floor, N gates, tier ladder as a pure function. **Now runs two independently-corrected families** — see "Second deviation" below. |
+| A8 Recompute | done | Detached CPU work, phased progress, cancellable, output hash for reproducibility checks. Split into a cheap automatic derive-only path and a manual, user-initiated full-scan path — see below. |
+| A9 Dashboard | done | Designed 0-day and mid-history states computed from the real gates. Warm light theme (cream/terracotta, not system dark mode), percent-of-baseline deviation labels, tap-to-expand quick look per metric, data-driven nav titles (today's date, not the word "Today"). |
+| A10 Metric detail | done | Baseline band drawn at actual robust SD; HRV percentile blocked by `Metric.permitsNormativePercentile`. Chart x-axis fixed to plot real `Date`s (was plotting raw `"YYYY-MM-DD"` strings as categorical labels); distribution is a proper equal-width histogram, not one bar per distinct value. |
+| A11 Findings | done | Tier badges differ in colour, icon *and* wording; family size shown. Substantially extended beyond spec — manual scan trigger with disclosure screen, family-level dedup, per-finding physiological rationale, smoothed dual-line trend chart. See "Second deviation" below. |
 | A12 Corpus | **not done** | Curation labour, not code — see below |
 | A13 Retrieval | done | BM25 + brute-force cosine via Accelerate, RRF, applicability filter before fusion |
 | A14 Narrator | done | Scope classifier, numeral membership check, citation validation, retrieval gate, template fallback |
@@ -80,6 +80,56 @@ gate at 500 trials in PR CI and 1,000 nightly.
 
 ---
 
+## The second deviation from spec, and why
+
+`BUILD-APP.md`/`SPEC.md` design one scan family: constructs tested against calendar/location
+**context** features (`ScanFamily.contextAssociations`). In practice, on a real device with
+real data, that family is permanently empty — nothing in the shipped UI ever calls
+`ContextService.requestCalendarAccess()` or starts location monitoring, so
+`context.calendarAvailability` never leaves `.notDetermined`, `storedFeatures` in `Recompute`
+is always `[]`, and `Analyzer.scan`'s `guard !candidates.isEmpty else { return [] }` fires on
+every run. The Findings screen was permanently empty, independent of tier or history length.
+
+Rather than only wiring the permission request (which still leaves the 60/90-day sample-size
+floor in §4.1 out of reach for the first two months of use), a second family was added:
+
+**`ScanFamily.biometricAssociations`** — constructs tested against *each other*, using the same
+`Analyzer.scan` machinery (bootstrap, BH-FDR, stability, confounder screen, tier ladder)
+unchanged, with two additions:
+
+1. **`symmetric: Bool` mode.** Feeding the same metric universe into both sides of `scan()`
+   as `constructs` and `features` needed two new guards that don't apply to context
+   associations: a construct can't be tested against itself, and — critically — not against
+   another metric in the same `MetricFamily` either. Sleep duration vs. REM sleep, or Body
+   Battery min vs. max, will always correlate because one is mechanically close to a function
+   of the other; testing them isn't a hypothesis, it's arithmetic. Excluded from the candidate
+   pool at generation time, not merely deduplicated after the fact.
+2. **`ScanConfig.biometricSelf`.** The base config's `minNSameDay = 60` / `minNLagged = 90`
+   are calibrated for sparse, categorical context data — reasonable there, but it means a
+   dense, continuous, near-daily biometric pair would also wait two months to say anything.
+   Lowered to 21/30 days for this family only, with a matching cut to `nBoot` (2,000 → 400)
+   and `lags` (`0...3` → `0...1`): the base bootstrap cost had never actually run at volume in
+   production (the context family's candidate list was always empty), and testing every metric
+   against every other was enough unoptimized numeric work in a debug build to peg the CPU hard
+   enough to make the app briefly unresponsive on-device. Cut until a from-scratch profiling
+   pass says otherwise.
+
+Both families are BH-corrected **independently** and persisted under their own `family_id`, so
+`familySize`/`q` for one is never contaminated by the other's candidate count.
+
+The scan itself was also made **manual**, not automatic — `Recompute` is split into
+`runDeriveOnly` (today's numbers and baselines; safe to run on every launch, background
+delivery tick, and pull-to-refresh) and `runFullScan` (the association scan; runs only from
+the explicit "Update Insights" screen, which discloses the ~1-minute wait before starting).
+`AppServices.bootstrap()` now calls only the former.
+
+The Findings list itself also collapses by `MetricFamily` pair rather than by exact metric —
+Body Battery min and max both correlating with sleep is one relationship, not two — keeping
+only the single strongest result per family pair. `familySize`/`q` in the stats block still
+reflect the full, uncollapsed candidate count; only the *display* list is collapsed.
+
+---
+
 ## Xcode project — wired
 
 - App target "Health Engine" (module name `HealthIntelligence`, matching `SPEC.md` §3's
@@ -130,12 +180,22 @@ What A12 needs, concretely:
 
 ## Not yet wired
 
+- **Calendar/location permission is never requested.** `ContextService.requestCalendarAccess()`
+  and the location-monitoring entry point exist and work, but nothing in the UI calls them —
+  no onboarding screen, no button, no `.task`. This is why `ScanFamily.contextAssociations` is
+  empty in practice (see "second deviation" above) and why tier never reaches 2 on a real
+  device today. Highest-value next wire: a real affordance for it, most naturally as an action
+  on the existing `TierPrompt` view, which currently just displays text.
 - **CoreLocation visit accumulation.** `ContextService` posts visits on a notification;
-  nothing yet holds them between launches. Third in the cut order, and EventKit alone
-  reaches tier 2.
+  nothing yet holds them between launches. Moot until the permission above is actually
+  requested.
 - **Strain calibration.** `Strain.compressionC` (90) and `compressionFull` (480) are
   placeholders. They need tuning against reference days before the 0–21 number means
   anything. Until then it is an internally consistent ordinal, not a comparable score.
+- **Biometric-scan bootstrap cost.** `ScanConfig.biometricSelf`'s `nBoot`/`lags` cuts (above)
+  were a fast, conservative response to an on-device freeze, not a profiled optimum. A Release
+  build (`-O`, not the `-Onone` debug build this was measured under) is very likely fast enough
+  to raise them back toward the base config; not yet measured.
 - **Optional items, in the documented cut order:** AR(p) pre-whitening cross-check,
   change-point detection, lag heatmap. None started; all correctly listed as cuttable.
 

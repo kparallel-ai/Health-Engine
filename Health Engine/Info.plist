@@ -10,6 +10,8 @@
 	<string>Health Engine uses infrequent, significant location changes to estimate time spent away from home and timezone shifts. It never tracks continuous location.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Health Engine uses infrequent, significant location changes to estimate time spent away from home and timezone shifts. It never tracks continuous location.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Health Engine reads your recent activity history (stationary, walking, automotive) to look for associations with your physiology. Only the last 7 days are ever available, and everything is processed on your device.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>healthkit</string>

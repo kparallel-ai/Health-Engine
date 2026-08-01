@@ -220,6 +220,148 @@ final class StatsTests: XCTestCase {
         // T4 is unreachable without a randomised trial flag, which nothing in this build sets.
     }
 
+    // MARK: - Rank correlation
+
+    func testRankTransformAssignsAverageRanksToTies() {
+        // Two-way tie at the bottom (ranks 1,2 -> 1.5 each), a clean run, then a three-way tie
+        // at the top (ranks 5,6,7 -> 6 each).
+        let ranks = rankTransform([10, 10, 20, 30, 40, 40, 40])
+        XCTAssertEqual(ranks, [1.5, 1.5, 3, 4, 6, 6, 6])
+    }
+
+    func testRankTransformIsInvariantToMonotonicRescaling() {
+        var rng = SeededRNG(seed: 0x2A2A_1234)
+        let x = (0..<50).map { _ in Double(rng.nextInt(below: 1000)) }
+        let rescaled = x.map { exp($0 / 100) }              // monotonic, wildly non-linear
+        XCTAssertEqual(rankTransform(x), rankTransform(rescaled))
+    }
+
+    /// Spearman on ranks should recover a strong monotonic relationship that Pearson on the raw,
+    /// right-skewed values understates — the entire reason `rankTransformed` exists.
+    func testSpearmanRecoversMonotonicRelationshipPearsonUnderstates() {
+        let x = (1...40).map(Double.init)
+        let y = x.map { pow($0, 5) }                         // strictly increasing, heavily skewed
+        let rawR = pearson(x, y)
+        let rankR = pearson(rankTransform(x), rankTransform(y))
+        XCTAssertEqual(rankR, 1.0, accuracy: 1e-9)            // perfectly monotonic -> rho = 1
+        XCTAssertLessThan(rawR, rankR)
+    }
+
+    func testAnalyzerScanRecordsCorrelationMethodPerFeature() throws {
+        var rng = SeededRNG(seed: 0x5EED_1)
+        let days = (0..<80).map { Day(Date(timeIntervalSince1970: Double($0) * 86400), calendar: .autoupdatingCurrent) }
+        let base = (0..<80).map { _ in gaussian(&rng) }
+
+        var constructs: [DailyConstruct] = []
+        var features: [ContextFeature] = []
+        for (i, day) in days.enumerated() {
+            constructs.append(DailyConstruct(day: day, construct: .hrResting, value: base[i],
+                                             baseline: nil, deviationZ: nil, nSamples: 1,
+                                             confidence: 1, flags: [], deriveVersion: "test"))
+            features.append(ContextFeature(day: day, feature: .ctxMeetingHours,
+                                           value: base[i] + gaussian(&rng) * 0.1, isDense: true,
+                                           source: .eventkit, deriveVersion: "test"))
+        }
+
+        let findings = Analyzer.scan(constructs: constructs, features: features,
+                                     family: .contextAssociations,
+                                     rankTransformed: { $0 == .ctxMeetingHours })
+        let match = try XCTUnwrap(findings.first { $0.object == Metric.ctxMeetingHours.rawValue })
+        XCTAssertTrue(match.method.hasPrefix("spearman;"))
+
+        let pearsonFindings = Analyzer.scan(constructs: constructs, features: features,
+                                            family: .contextAssociations)
+        let pearsonMatch = try XCTUnwrap(pearsonFindings.first { $0.object == Metric.ctxMeetingHours.rawValue })
+        XCTAssertTrue(pearsonMatch.method.hasPrefix("pearson;"))
+    }
+
+    // MARK: - Feature budget
+
+    func testDenseFeatureCountCountsDistinctFeatureTypesNotRows() {
+        let day = Day(raw: "2025-01-01")
+        let features = (0..<10).map { _ in
+            ContextFeature(day: day, feature: .ctxMeetingHours, value: 1, isDense: true,
+                          source: .eventkit, deriveVersion: "test")
+        } + [
+            ContextFeature(day: day, feature: .ctxFirstEventHour, value: 1, isDense: true,
+                          source: .eventkit, deriveVersion: "test"),
+            // Sparse rows for a third feature type must not count toward the budget.
+            ContextFeature(day: day, feature: .ctxTimezoneShift, value: nil, isDense: false,
+                          source: .location, deriveVersion: "test")
+        ]
+        XCTAssertEqual(Analyzer.denseFeatureCount(features), 2)
+    }
+
+    // MARK: - Motion context features
+
+    func testDeriveMotionFeaturesComputesLongestStationaryBlockAndAutomotiveMinutes() throws {
+        let boundary = DayBoundary(sleepSessions: [])
+        let day0 = Date(timeIntervalSince1970: 0)
+        func at(_ hours: Double) -> Date { day0.addingTimeInterval(hours * 3600) }
+
+        let samples: [ContextService.MotionSample] = [
+            ContextService.MotionSample(start: at(0), stationary: true, automotive: false,
+                                        walking: false, running: false, cycling: false),
+            ContextService.MotionSample(start: at(2), stationary: false, automotive: false,
+                                        walking: true, running: false, cycling: false),
+            ContextService.MotionSample(start: at(2.5), stationary: false, automotive: true,
+                                        walking: false, running: false, cycling: false),
+            ContextService.MotionSample(start: at(3), stationary: true, automotive: false,
+                                        walking: false, running: false, cycling: false)
+        ]
+        // Coverage ends 5 hours in: the last (stationary) segment runs 2 hours, shorter than
+        // the first 2-hour stationary block, so the max should stay at the first block.
+        let upTo = at(5)
+
+        let out = ContextService.deriveMotionFeatures(samples: samples, upTo: upTo,
+                                                       boundary: boundary, calendar: .autoupdatingCurrent)
+        let day = boundary.day(for: day0)
+
+        let sedentaryMax = out.first { $0.feature == .ctxSedentaryMaxBlock && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(sedentaryMax?.value), 120, accuracy: 0.01)   // 2 hours = 120 min
+
+        let automotive = out.first { $0.feature == .ctxAutomotiveMinutes && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(automotive?.value), 30, accuracy: 0.01)      // 30 minutes automotive
+
+        let transitions = out.first { $0.feature == .ctxActivityTransitions && $0.day == day }
+        XCTAssertEqual(transitions?.value, 3)                       // 4 segments, 3 state changes
+    }
+
+    func testDeriveMotionFeaturesIgnoresConfidenceOnlyReemission() throws {
+        let boundary = DayBoundary(sleepSessions: [])
+        let day0 = Date(timeIntervalSince1970: 0)
+        func at(_ hours: Double) -> Date { day0.addingTimeInterval(hours * 3600) }
+
+        // Same state (stationary) reported twice in a row — not a real transition.
+        let samples: [ContextService.MotionSample] = [
+            ContextService.MotionSample(start: at(0), stationary: true, automotive: false,
+                                        walking: false, running: false, cycling: false),
+            ContextService.MotionSample(start: at(1), stationary: true, automotive: false,
+                                        walking: false, running: false, cycling: false)
+        ]
+        let out = ContextService.deriveMotionFeatures(samples: samples, upTo: at(3),
+                                                       boundary: boundary, calendar: .autoupdatingCurrent)
+        let day = boundary.day(for: day0)
+        let transitions = out.first { $0.feature == .ctxActivityTransitions && $0.day == day }
+        XCTAssertEqual(transitions?.value, 0)
+        // The whole 3-hour span is one continuous stationary block.
+        let sedentaryMax = out.first { $0.feature == .ctxSedentaryMaxBlock && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(sedentaryMax?.value), 180, accuracy: 0.01)
+    }
+
+    func testDeriveMotionFeaturesEmitsMeasuredZeroNotMissingRow() {
+        // A fully covered day with zero automotive time is a measured zero, not an absent row.
+        let boundary = DayBoundary(sleepSessions: [])
+        let day0 = Date(timeIntervalSince1970: 0)
+        let samples = [ContextService.MotionSample(start: day0, stationary: true, automotive: false,
+                                                    walking: false, running: false, cycling: false)]
+        let out = ContextService.deriveMotionFeatures(samples: samples, upTo: day0.addingTimeInterval(3600),
+                                                       boundary: boundary, calendar: .autoupdatingCurrent)
+        let day = boundary.day(for: day0)
+        let automotive = out.first { $0.feature == .ctxAutomotiveMinutes && $0.day == day }
+        XCTAssertEqual(automotive?.value, 0)
+    }
+
     // MARK: - Day arithmetic
 
     func testDayArithmeticSurvivesDSTTransition() {

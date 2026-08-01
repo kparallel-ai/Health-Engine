@@ -53,10 +53,31 @@ final class AppServices: ObservableObject {
         try? await healthKit.sync()
         try? await healthKit.enableBackgroundDelivery()
         healthKit.startObserving { [weak self] in
-            Task { @MainActor in self?.triggerRecompute() }
+            Task { @MainActor in
+                self?.triggerRecompute()
+                self?.syncMotionContext()
+            }
         }
         updateTier()
         triggerRecompute()
+        syncMotionContext()
+    }
+
+    /// Cheap on-device query, not a statistical computation — safe to run on launch and on
+    /// every background HealthKit delivery, unlike the association scan. `CMMotionActivityManager`
+    /// only ever holds 7 days of history, so calling this often is what keeps coverage current;
+    /// see `ContextService.motionContextFeatures`.
+    func syncMotionContext() {
+        Task { [context, healthKit] in
+            let now = Date()
+            guard let weekAgo = Calendar.autoupdatingCurrent.date(byAdding: .day, value: -7, to: now)
+            else { return }
+            let sleep = (try? await healthKit.sleepSessions(from: weekAgo, to: now)) ?? []
+            let boundary = DayBoundary(sleepSessions: sleep)
+            let features = await context.motionContextFeatures(boundary: boundary)
+            guard !features.isEmpty else { return }
+            try? context.persist(features)
+        }
     }
 
     func updateTier() {

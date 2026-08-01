@@ -6,12 +6,14 @@
 import Foundation
 import EventKit
 import CoreLocation
+import CoreMotion
 
 public final class ContextService: NSObject {
     private let db: Store
     private let calendar: Calendar
     private let eventStore = EKEventStore()
     private let locationManager = CLLocationManager()
+    private let motionActivityManager = CMMotionActivityManager()
 
     public init(store: Store, calendar: Calendar = .autoupdatingCurrent) {
         self.db = store
@@ -37,6 +39,18 @@ public final class ContextService: NSObject {
         case .authorizedAlways, .authorizedWhenInUse: return .granted
         case .notDetermined:                          return .notDetermined
         default:                                      return .denied
+        }
+    }
+
+    /// No explicit request API: `queryActivityStarting` triggers the system prompt itself on
+    /// first use. `isActivityAvailable()` is false on devices with no motion coprocessor —
+    /// treated the same as denied, since the feature is equally absent either way.
+    public var motionAvailability: Availability {
+        guard CMMotionActivityManager.isActivityAvailable() else { return .denied }
+        switch CMMotionActivityManager.authorizationStatus() {
+        case .authorized:    return .granted
+        case .notDetermined: return .notDetermined
+        default:             return .denied
         }
     }
 
@@ -196,6 +210,135 @@ public final class ContextService: NSObject {
         let lat = densest.map(\.coordinate.latitude).reduce(0, +) / Double(densest.count)
         let lon = densest.map(\.coordinate.longitude).reduce(0, +) / Double(densest.count)
         return CLLocation(latitude: lat, longitude: lon)
+    }
+
+    // MARK: - Motion features
+
+    /// This app's own vocabulary for a `CMMotionActivity` — `CMMotionActivity` itself has no
+    /// public initialiser, so anything downstream that touches it can't be unit tested. Mapping
+    /// to this immediately after the query keeps `deriveMotionFeatures` pure and testable,
+    /// mirroring `HeartRateSample`/`SleepSession` for HealthKit.
+    public struct MotionSample: Sendable {
+        public let start: Date
+        public let stationary: Bool
+        public let automotive: Bool
+        public let walking: Bool
+        public let running: Bool
+        public let cycling: Bool
+
+        public init(start: Date, stationary: Bool, automotive: Bool, walking: Bool,
+                   running: Bool, cycling: Bool) {
+            self.start = start; self.stationary = stationary; self.automotive = automotive
+            self.walking = walking; self.running = running; self.cycling = cycling
+        }
+    }
+
+    /// `CMMotionActivityManager` keeps at most 7 days of history — a hard platform limit, not
+    /// a choice. This always asks for the trailing 7 days regardless of when it was last called;
+    /// a gap wider than that between calls (the app not opened in over a week) is permanently
+    /// unrecoverable, and those days are simply never covered — not backfilled, not
+    /// interpolated. `db.replace(features:)` upserts by (day, feature, derive_version), so
+    /// calling this repeatedly with overlapping windows is idempotent, which is what makes
+    /// "query on launch and on background refresh" a correct self-healing strategy rather than
+    /// something that needs its own anchor bookkeeping.
+    public func motionContextFeatures(boundary: DayBoundary) async -> [ContextFeature] {
+        guard motionAvailability != .denied else { return [] }
+        let to = Date()
+        guard let from = calendar.date(byAdding: .day, value: -7, to: to) else { return [] }
+
+        let samples: [MotionSample] = await withCheckedContinuation { continuation in
+            motionActivityManager.queryActivityStarting(from: from, to: to, to: .main) { activities, _ in
+                let mapped = (activities ?? []).map {
+                    MotionSample(start: $0.startDate, stationary: $0.stationary,
+                                automotive: $0.automotive, walking: $0.walking,
+                                running: $0.running, cycling: $0.cycling)
+                }
+                continuation.resume(returning: mapped)
+            }
+        }
+        guard !samples.isEmpty else { return [] }
+        return ContextService.deriveMotionFeatures(samples: samples, upTo: to,
+                                                    boundary: boundary, calendar: calendar)
+    }
+
+    /// Pure. A `CMMotionActivity` marks the *start* of a state; it persists until the next
+    /// sample (or `upTo`, for the last one). Each segment is attributed to the day it starts
+    /// in — the same simplification `calendarFeatures` makes for events that could technically
+    /// straddle midnight, rather than splitting a segment across two days for a marginal gain
+    /// in precision.
+    static func deriveMotionFeatures(samples: [MotionSample], upTo: Date,
+                                     boundary: DayBoundary, calendar: Calendar) -> [ContextFeature] {
+        let sorted = samples.sorted { $0.start < $1.start }
+
+        struct Segment { let day: Day; let minutes: Double; let stationary: Bool; let automotive: Bool
+                         let signature: String }
+
+        var raw: [Segment] = []
+        for (index, sample) in sorted.enumerated() {
+            let end = index + 1 < sorted.count ? sorted[index + 1].start : upTo
+            guard end > sample.start else { continue }
+            let minutes = end.timeIntervalSince(sample.start) / 60
+            let signature = "\(sample.stationary)-\(sample.walking)-\(sample.running)"
+                          + "-\(sample.automotive)-\(sample.cycling)"
+            raw.append(Segment(day: boundary.day(for: sample.start), minutes: minutes,
+                               stationary: sample.stationary, automotive: sample.automotive,
+                               signature: signature))
+        }
+        guard !raw.isEmpty else { return [] }
+
+        // CoreMotion re-emits an entry when only *confidence* changes, even if the state
+        // itself didn't — two "stationary" entries in a row are one continuous block, not two.
+        // Merge adjacent same-state, same-day entries before computing anything downstream, so
+        // "longest continuous segment" means what it says rather than "longest raw log entry."
+        var segments: [Segment] = []
+        for r in raw {
+            if let last = segments.last, last.day == r.day, last.signature == r.signature {
+                segments[segments.count - 1] = Segment(day: last.day, minutes: last.minutes + r.minutes,
+                                                        stationary: last.stationary,
+                                                        automotive: last.automotive,
+                                                        signature: last.signature)
+            } else {
+                segments.append(r)
+            }
+        }
+
+        var sedentaryMaxByDay: [Day: Double] = [:]
+        var automotiveByDay: [Day: Double] = [:]
+        var transitionsByDay: [Day: Int] = [:]
+        var previousSignature: String?
+
+        for segment in segments {
+            if segment.stationary {
+                sedentaryMaxByDay[segment.day] = max(sedentaryMaxByDay[segment.day] ?? 0, segment.minutes)
+            }
+            if segment.automotive {
+                automotiveByDay[segment.day, default: 0] += segment.minutes
+            }
+            // A confidence-only re-emission of the same state is not a transition — only count
+            // when the state itself changed.
+            if let previousSignature, previousSignature != segment.signature {
+                transitionsByDay[segment.day, default: 0] += 1
+            }
+            previousSignature = segment.signature
+        }
+
+        // Every day that had any coverage gets a row for all three features, including zero —
+        // a day with zero automotive minutes is a measured zero, not a missing observation,
+        // since the day was actually covered. Only days with no coverage at all get no row.
+        let coveredDays = Set(segments.map(\.day))
+        var out: [ContextFeature] = []
+        for day in coveredDays {
+            out.append(ContextFeature(day: day, feature: .ctxSedentaryMaxBlock,
+                                      value: sedentaryMaxByDay[day] ?? 0, isDense: true,
+                                      source: .motion, deriveVersion: IngestVersion.motion))
+            out.append(ContextFeature(day: day, feature: .ctxActivityTransitions,
+                                      value: Double(transitionsByDay[day] ?? 0), isDense: true,
+                                      source: .motion, deriveVersion: IngestVersion.motion))
+            out.append(ContextFeature(day: day, feature: .ctxAutomotiveMinutes,
+                                      value: automotiveByDay[day] ?? 0, isDense: true,
+                                      source: .motion, deriveVersion: IngestVersion.motion))
+        }
+        return out
     }
 
     // MARK: - Persistence

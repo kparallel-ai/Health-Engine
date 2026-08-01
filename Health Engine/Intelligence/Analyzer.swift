@@ -112,20 +112,49 @@ public func assignTier(_ e: TierEvidence) -> EvidenceTier {
 
 public enum Analyzer {
 
+    /// SPEC's BH rationale, verbatim: the threshold for rank i is (i/m)·q, so every dense
+    /// context feature added makes every *other* feature's threshold stricter, not just its
+    /// own. This caps only the `contextAssociations` axis — the biometric self-scan's ~25
+    /// constructs are a different, separately-gated candidate space and are not counted here.
+    public static let maxDenseContextFeatures = 20
+
+    /// Distinct dense feature *types* being offered as candidates, not rows — a year of daily
+    /// rows for one feature is still one feature. Exposed standalone so the budget rule is
+    /// testable without needing to trigger the precondition itself.
+    public static func denseFeatureCount(_ features: [ContextFeature]) -> Int {
+        Set(features.filter(\.isDense).map(\.feature)).count
+    }
+
     /// `symmetric` is true only when `features` was built from the same metric universe as
     /// `constructs` (the biometric self-scan) — a construct can't be tested against itself, and
     /// a same-day pair (A,B) is the identical hypothesis as (B,A), so both get skipped. Context
     /// associations pair two disjoint metric domains where no such collision is possible, and
     /// stay off by default so that behaviour is unchanged.
+    ///
+    /// `rankTransformed` decides, per candidate feature, whether to Spearman- rather than
+    /// Pearson-correlate — for features that are discretised, zero-inflated, or right-skewed,
+    /// where a linear-correlation assumption doesn't hold. Defaults to Pearson everywhere, so
+    /// existing callers and behaviour are unchanged.
     public static func scan(constructs: [DailyConstruct],
                             features: [ContextFeature],
                             family: ScanFamily,
                             config: ScanConfig = ScanConfig(),
-                            symmetric: Bool = false) -> [Finding] {
+                            symmetric: Bool = false,
+                            rankTransformed: (Metric) -> Bool = { _ in false }) -> [Finding] {
 
         // Sparse categorical events are annotations, never variables. A feature with six
         // occurrences a year cannot be tested and must not enter the family count either.
         let dense = features.filter(\.isDense)
+
+        // The biometric self-scan repurposes `ContextFeature` for constructs-as-features and
+        // is deliberately much larger than 20 — the budget is specific to real context features.
+        if family.id == ScanFamily.contextAssociations.id {
+            let count = Analyzer.denseFeatureCount(dense)
+            precondition(count <= Analyzer.maxDenseContextFeatures,
+                        "Context feature budget exceeded: \(count) dense features > "
+                        + "\(Analyzer.maxDenseContextFeatures). Adding a feature costs BH power "
+                        + "for every feature already there — remove one before adding one.")
+        }
 
         let constructSeries = Dictionary(grouping: constructs, by: \.construct)
             .mapValues { series -> [Day: Double] in
@@ -149,6 +178,7 @@ public enum Analyzer {
             let boot: BootstrapResult
             let stable: Bool, precedence: Bool, confounded: Bool
             let id: String
+            let method: String
         }
 
         var candidates: [Candidate] = []
@@ -172,8 +202,16 @@ public enum Analyzer {
                     let id = hypothesisID(construct: construct, feature: feature,
                                           lag: lag, family: family)
                     var rng = SeededRNG(seed: config.seed &+ stableSeed(id))
-                    let L = blockLength(x: pair.x, y: pair.y)
-                    let boot = blockBootstrapCorrelation(pair.x, pair.y, nBoot: config.nBoot,
+
+                    // Rank-transform before everything downstream — block length and the
+                    // bootstrap both run on whichever series (raw or rank) is actually being
+                    // tested. The bootstrap procedure itself doesn't change either way.
+                    let useSpearman = rankTransformed(feature)
+                    let x = useSpearman ? rankTransform(pair.x) : pair.x
+                    let y = useSpearman ? rankTransform(pair.y) : pair.y
+
+                    let L = blockLength(x: x, y: y)
+                    let boot = blockBootstrapCorrelation(x, y, nBoot: config.nBoot,
                                                          blockLength: L, rng: &rng)
 
                     let stable = isStable(pair.x, pair.y, config: config)
@@ -186,7 +224,8 @@ public enum Analyzer {
 
                     candidates.append(Candidate(construct: construct, feature: feature, lag: lag,
                                                 boot: boot, stable: stable, precedence: precedence,
-                                                confounded: confounded, id: id))
+                                                confounded: confounded, id: id,
+                                                method: useSpearman ? "spearman" : "pearson"))
                 }
             }
         }
@@ -218,8 +257,8 @@ public enum Analyzer {
                            pRaw: candidate.boot.p, qValue: qValue,
                            nObservations: candidate.boot.n,
                            familyID: family.id, familySize: familySize,
-                           method: "moving-block-bootstrap;L=\(candidate.boot.blockLength);"
-                                 + "B=\(candidate.boot.nBoot);BH-FDR",
+                           method: "\(candidate.method);moving-block-bootstrap;"
+                                 + "L=\(candidate.boot.blockLength);B=\(candidate.boot.nBoot);BH-FDR",
                            windowsStable: candidate.stable,
                            computedAt: now, inferVersion: InferVersion.current)
         }

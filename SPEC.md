@@ -41,12 +41,13 @@ Not an objective for this build: App Store release.
 All computation runs on the phone.
 
 ```
-HealthKit ──┐
-EventKit  ──┼──► Store ──► Derive ──► Analyzer ──► Findings
-Location  ──┤              (measurements)  (facts)      │
-Garmin    ──┘                                           ▼
-(optional import)                          Retrieval ──► Narrator ──► UI
-                                        (bundled corpus)  (phrasing)
+HealthKit      ─┐
+EventKit       ─┤
+Location       ─┼──► Store ──► Derive ──► Analyzer ──► Findings
+Motion         ─┤              (measurements)  (facts)      │
+DeviceActivity ─┤                                           ▼
+Garmin         ─┘                               Retrieval ──► Narrator ──► UI
+(optional import)                            (bundled corpus)  (phrasing)
 ```
 
 **One rule:** epistemic status changes exactly once per boundary. `Derive` produces measurements. `Analyzer` produces facts, not conclusions. `Narrator` phrases facts, never makes them. Enforce in types, not conventions.
@@ -56,8 +57,11 @@ HealthIntelligence/
 ├── Health/
 │   ├── HealthKitService.swift   — HealthKit boundary: auth, queries, units
 │   ├── GarminImport.swift       — optional export → observations, dedup
-│   ├── ContextService.swift     — EventKit, CoreLocation
+│   ├── ContextService.swift     — EventKit, CoreLocation, CoreMotion
+│   ├── DeviceActivity.swift     — threshold registration + callback ingestion
 │   └── HealthModels.swift       — app-level model, no framework dependency
+├── ActivityMonitor/             — DeviceActivityMonitor extension target
+│   └── MonitorExtension.swift   — writes threshold crossings to the app group
 ├── Store/
 │   └── Store.swift              — observations, constructs, findings
 ├── Intelligence/
@@ -87,15 +91,44 @@ The app works at tier 1. Each tier above unlocks capability and says so in the U
 | Tier | Source | Unlocks |
 |---|---|---|
 | 0 | None | Explainers |
-| 1 | **HealthKit** — automatic | RHR, HRV (SDNN), VO₂max, sleep stages, workouts, respiratory rate, wrist temperature. Baselines, deviations, trends, T0–T1 findings. |
-| 2 | **+ EventKit, CoreLocation** — automatic, permission-gated | Meeting density, schedule shape, time away from home, timezone shift. Context associations, T2–T3 findings. |
-| 3 | **+ Garmin import** — manual, optional | Body Battery, HRV status, training readiness, lactate threshold, endurance score, stress, longer history. Deeper baselines, more constructs, higher-confidence findings. |
+| 1 | **HealthKit** — automatic | RHR, HRV (SDNN), VO₂max, sleep stages and onset, night wakings, workouts, respiratory rate, wrist temperature. Baselines, deviations, trends, T0–T1 findings. |
+| 2 | **+ EventKit, CoreLocation, CoreMotion** — permission-gated, no entitlement | Schedule shape and meeting density, time away from home, timezone shift, sedentary blocks, activity fragmentation, commute. Context associations, T2–T3 findings. |
+| 3 | **+ DeviceActivity** — requires Family Controls entitlement | Estimated daily and late-night device minutes at 5-minute resolution, coarse hourly usage profile. Behavioural context, T1–T2 findings. **No historical backfill — starts its own clock at registration.** |
+| 4 | **+ Garmin import** — manual, optional | RMSSD, HRV status, Body Battery, training readiness, lactate threshold, endurance score, stress, longer history. Deeper baselines, more constructs, higher-confidence findings. |
 
-**Never required, always rewarded.** Tier 3 is a power-user path — a one-time historical backfill, not an ongoing dependency. Nothing about it gates the core experience.
+**Never required, always rewarded.** Tiers are independent, not sequential — a user can connect 4 without 3. Nothing above tier 1 gates the core experience.
 
 Progressive disclosure is the onboarding: each tier's screen shows what connecting it would unlock, computed from the real gates in `Analyzer`.
 
-### 4.1 Data volume gates
+### 4.2 Device activity — what the platform permits
+
+Apple's own Screen Time app is first-party and uses private entitlements. Third-party apps get no equivalent: **per-app identities and true historical usage are unavailable.**
+
+The Report extension is sealed — app-group writes are dropped, files fail, network and notifications are blocked. Confirmed by Apple as intentional. It cannot be used for data extraction.
+
+The Monitor extension is the supported path, and it yields a usable estimate. It generates no usage data itself; it fires a callback each time a registered threshold is crossed. Register thresholds every 5 minutes across an interval, count the callbacks, multiply by 5, and you have a usage estimate at 5-minute resolution.
+
+**Registration design.** Twelve 2-hour schedules cover the day. Each carries events at 5-minute increments from 5 to 115 minutes. One registration yields daily total, late-night total, and a coarse hourly usage profile.
+
+Platform limits, all binding:
+
+| Limit | Consequence |
+|---|---|
+| ~20 monitoring activities maximum | Twelve 2-hour intervals fits with headroom. Finer intervals do not. |
+| No historical data | Collection begins at registration. **Tier 3 runs on its own clock**, independent of HealthKit backfill. |
+| `intervalDidEnd` fires regardless of use | Count only `eventDidReachThreshold`. The final 5 minutes of each interval are unreliable. |
+| Registration is slow | Offload to a background task. |
+| Scope is user-selected via `FamilyActivityPicker` | Category and token level only. The app never learns application identities. |
+
+Values are estimates, discretised at 5 minutes and zero-inflated. They carry `quality = 0.8` and are correlated by rank, not by Pearson.
+
+### 4.3 Interpretive limit
+
+Screen data is a weak proxy for mental state and its causal direction is unresolvable: late-night device use is as plausibly a symptom of poor sleep as a cause of it. **Device-activity features may support T1–T2 associations; they reach T3 only with corroborating context.**
+
+Sleep onset and night wakings from tier 1 remain the better measure of late nights — continuous, precise, free, and available retroactively. Device activity earns its place on the *daytime* dimension: total load and how it distributes across the day.
+
+### 4.4 Data volume gates
 
 | Analysis | Min days | Comfortable |
 |---|---|---|
@@ -119,6 +152,11 @@ Scanning 25 constructs × 20 context features × 4 lags is 2,000 tests. At α = 
 | Effect floor | \|r\| < 0.25 never surfaces, regardless of q |
 | Minimum N | Per-finding gates from §4.1, enforced and surfaced |
 | Stability | Must hold in ≥2 non-overlapping windows to reach T2 |
+| Feature budget | Context features capped at 20. See below. |
+
+**Features are not free.** The BH threshold for rank *i* is (i/m)·q, so family size scales the strictness of every test in it. Going from 20 to 30 context features at 25 constructs × 4 lags takes m from 2,000 to 3,000 and makes every existing feature's threshold 1.5× stricter. Adding a marginal feature costs power for the features already there.
+
+The cap is therefore a design constraint, not an implementation limit: a curated set of dense, interpretable features beats everything the phone can emit. Adding one means removing one.
 
 ### 5.1 Evidence tiers
 

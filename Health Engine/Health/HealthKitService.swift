@@ -10,6 +10,7 @@ public enum IngestVersion {
     public static let eventKit  = "ek-1.0.0"
     public static let location  = "loc-1.0.0"
     public static let garmin    = "garmin-1.0.0"
+    public static let motion    = "motion-1.0.0"
 }
 
 public final class HealthKitService {

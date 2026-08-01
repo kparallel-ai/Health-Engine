@@ -25,6 +25,9 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
     case ctxLastEventHour         = "ctx.last_event_hour"
     case ctxMinutesOutsideHome    = "ctx.minutes_outside_home"
     case ctxTimezoneShift         = "ctx.timezone_shift"
+    case ctxSedentaryMaxBlock     = "ctx.sedentary_max_block"
+    case ctxActivityTransitions   = "ctx.activity_transitions"
+    case ctxAutomotiveMinutes     = "ctx.automotive_minutes"
 
     // Tier 3 — Garmin
     case hrvRMSSDOvernight        = "hrv.rmssd_overnight"
@@ -50,7 +53,9 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .loadStrainTrimp:                           return "au_0_21"
         case .ctxMeetingHours, .ctxFirstEventHour,
              .ctxLastEventHour, .ctxTimezoneShift:       return "h"
-        case .ctxMinutesOutsideHome:                     return "min"
+        case .ctxMinutesOutsideHome, .ctxSedentaryMaxBlock,
+             .ctxAutomotiveMinutes:                       return "min"
+        case .ctxActivityTransitions:                    return "count"
         case .hrvStatusGarmin:                           return "enum"
         case .bodyBatteryMin, .bodyBatteryMax,
              .stressAvg:                                 return "0_100"
@@ -61,7 +66,8 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
     public var tier: Int {
         switch self {
         case .ctxMeetingHours, .ctxFirstEventHour, .ctxLastEventHour,
-             .ctxMinutesOutsideHome, .ctxTimezoneShift:
+             .ctxMinutesOutsideHome, .ctxTimezoneShift,
+             .ctxSedentaryMaxBlock, .ctxActivityTransitions, .ctxAutomotiveMinutes:
             return 2
         case .hrvRMSSDOvernight, .hrvStatusGarmin, .bodyBatteryMin, .bodyBatteryMax,
              .stressAvg, .loadTrainingGarmin, .spo2AvgOvernight,
@@ -119,6 +125,9 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .ctxLastEventHour:        return "Last Event"
         case .ctxMinutesOutsideHome:   return "Time Away From Home"
         case .ctxTimezoneShift:        return "Timezone Shift"
+        case .ctxSedentaryMaxBlock:    return "Longest Sedentary Block"
+        case .ctxActivityTransitions:  return "Activity Transitions"
+        case .ctxAutomotiveMinutes:    return "Time In Vehicle"
         case .hrvStatusGarmin:         return "HRV Status"
         case .bodyBatteryMin:          return "Body Battery (min)"
         case .bodyBatteryMax:          return "Body Battery (max)"
@@ -146,6 +155,9 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
              .ctxLastEventHour:                               return "calendar"
         case .ctxMinutesOutsideHome:                        return "figure.walk"
         case .ctxTimezoneShift:                             return "globe"
+        case .ctxSedentaryMaxBlock:                         return "chair.fill"
+        case .ctxActivityTransitions:                       return "arrow.triangle.swap"
+        case .ctxAutomotiveMinutes:                         return "car.fill"
         case .bodyBatteryMin, .bodyBatteryMax:               return "battery.75"
         case .stressAvg:                                    return "brain.head.profile"
         case .spo2AvgOvernight:                             return "drop.fill"
@@ -181,7 +193,8 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .vo2maxRunning, .enduranceScore:
             return .fitness
         case .ctxMeetingHours, .ctxFirstEventHour, .ctxLastEventHour,
-             .ctxMinutesOutsideHome, .ctxTimezoneShift:
+             .ctxMinutesOutsideHome, .ctxTimezoneShift,
+             .ctxSedentaryMaxBlock, .ctxActivityTransitions, .ctxAutomotiveMinutes:
             return .context
         }
     }
@@ -193,7 +206,7 @@ public enum MetricFamily: String, Hashable, Sendable {
 }
 
 public enum Source: String, Codable, Sendable {
-    case healthkit, eventkit, location, garmin
+    case healthkit, eventkit, location, garmin, motion
 }
 
 // MARK: - Observation

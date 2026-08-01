@@ -111,6 +111,26 @@ public func blockLength(x: [Double], y: [Double]) -> Int {
 
 // MARK: - Correlation
 
+/// Average ("fractional") ranks, 1-based — ties share the mean of the ranks they'd otherwise
+/// span. Rank-transforming both series before `blockBootstrapCorrelation` turns the existing
+/// Pearson machinery into a Spearman rank correlation with no changes to the bootstrap itself:
+/// Pearson's r on ranks *is* Spearman's rho.
+public func rankTransform(_ x: [Double]) -> [Double] {
+    let n = x.count
+    guard n > 0 else { return [] }
+    let order = (0..<n).sorted { x[$0] < x[$1] }
+    var ranks = [Double](repeating: 0, count: n)
+    var i = 0
+    while i < n {
+        var j = i
+        while j + 1 < n, x[order[j + 1]] == x[order[i]] { j += 1 }
+        let averageRank = Double(i + j) / 2.0 + 1.0
+        for k in i...j { ranks[order[k]] = averageRank }
+        i = j + 1
+    }
+    return ranks
+}
+
 public func pearson(_ x: [Double], _ y: [Double]) -> Double {
     let n = min(x.count, y.count)
     guard n > 2 else { return 0 }

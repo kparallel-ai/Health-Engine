@@ -171,6 +171,7 @@ public final class Recompute: ObservableObject {
 
         let storedFeatures = try db.features(version: IngestVersion.eventKit)
             + db.features(version: IngestVersion.location)
+            + db.features(version: IngestVersion.motion)
         let contextFamily = ScanFamily.contextAssociations
 
         // Calendar/location permission is never requested anywhere in the app today, so

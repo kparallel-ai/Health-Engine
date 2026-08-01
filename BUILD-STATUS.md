@@ -178,6 +178,55 @@ What A12 needs, concretely:
 
 ---
 
+## The third deviation from spec, and why: DeviceActivity was not built
+
+The spec's passive-context-capture update asked for four things: CoreMotion features, a
+DeviceActivity tier (Screen Time API, via a new `ActivityMonitor` extension target with the
+Family Controls entitlement), rank correlation in the analyzer, and a feature-budget assertion.
+Three shipped. DeviceActivity did not, and — as things stand — can't.
+
+This project signs with a **personal development team** (free Apple ID, no paid Developer
+Program membership). Confirmed by actually attempting it, not by assumption: adding
+`com.apple.developer.family-controls` to the entitlements and building for the device fails
+with
+
+```
+Cannot create a iOS App Development provisioning profile for "Personal.Health-Engine".
+Personal development teams, including "Ketu Patel", do not support the
+Family Controls (Development) capability.
+```
+
+Family Controls is a restricted entitlement Apple grants only to paid accounts after a manual
+review. Unlike the other three changes, this isn't a "not yet wired" gap that a future session
+can close by writing more code — no amount of correct Swift changes that. It needs a paid
+account and Apple's approval first. (App Groups, by contrast, works fine on a personal team —
+tested the same way — so the host-app/extension shared-storage half of the design isn't blocked,
+only the entitlement itself is.)
+
+What this took off the table, downstream:
+
+- **The `ActivityMonitor` extension target, `DeviceActivityMonitor` subclass, and the
+  `ctx.screen_*` feature derivation.** None of it started. Writing it without the entitlement to
+  actually build and run it against would mean shipping code no one could verify — the SPEC's
+  own instruction for this situation is to stop and say so rather than do that.
+- **The screen-feature-specific pieces of the analyzer changes** — the T2 tier cap for
+  `ctx.screen_*` findings, and the independent minimum-N clock keyed to first-callback rather
+  than install date. Both are specified entirely in terms of a metric family that doesn't exist
+  in this build. What *did* ship is the general mechanism they'd hang off: `Analyzer.scan` now
+  takes a `rankTransformed: (Metric) -> Bool` closure (default: Pearson everywhere, so no
+  existing behaviour changed) that decides per-feature whether to rank-transform before the
+  block bootstrap, and records `"pearson"` or `"spearman"` in `finding.method`. When
+  DeviceActivity ships, wiring screen features through it is a few lines at the call site, not a
+  redesign.
+
+Everything else in the spec update — CoreMotion features (`ctx.sedentary_max_block`,
+`ctx.activity_transitions`, `ctx.automotive_minutes`, derived in `ContextService.swift`, queried
+on launch and on every HealthKit background-delivery callback, correctly bounded to CoreMotion's
+hard 7-day history limit with no backfill across gaps) and the feature-budget precondition
+(`Analyzer.maxDenseContextFeatures = 20`, asserted at scan time against the `contextAssociations`
+family only — the biometric self-scan's construct count is a separate, uncapped axis) — shipped
+as specified.
+
 ## Not yet wired
 
 - **Calendar/location permission is never requested.** `ContextService.requestCalendarAccess()`
@@ -185,7 +234,10 @@ What A12 needs, concretely:
   no onboarding screen, no button, no `.task`. This is why `ScanFamily.contextAssociations` is
   empty in practice (see "second deviation" above) and why tier never reaches 2 on a real
   device today. Highest-value next wire: a real affordance for it, most naturally as an action
-  on the existing `TierPrompt` view, which currently just displays text.
+  on the existing `TierPrompt` view, which currently just displays text. Motion is the one
+  exception: `ContextService.motionAvailability`/`motionContextFeatures` are wired into
+  `AppServices.bootstrap()` and the background-delivery callback already, since CoreMotion's
+  system permission prompt is triggered by the query itself and needs no separate UI.
 - **CoreLocation visit accumulation.** `ContextService` posts visits on a notification;
   nothing yet holds them between launches. Moot until the permission above is actually
   requested.

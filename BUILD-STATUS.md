@@ -227,20 +227,76 @@ hard 7-day history limit with no backfill across gaps) and the feature-budget pr
 family only — the biometric self-scan's construct count is a separate, uncapped axis) — shipped
 as specified.
 
+## Passive context capture, round two: steps, places, and additional HealthKit signals
+
+A follow-up to the "third deviation" above, using only standard permissions this time —
+no Family Controls anywhere in the target, confirmed by grep as well as by design. Four pieces,
+all shipped:
+
+- **Day shape from hourly step buckets** (`ctx.activity_onset_hour`, `ctx.activity_offset_hour`,
+  `ctx.active_span_hours`, `ctx.activity_fragmentation`) — `HealthKitService.hourlyStepBuckets`
+  (`HKStatisticsCollectionQuery`, one clock-hour per bucket) feeding
+  `ContextService.deriveDayShapeFeatures`, gated by the named constant
+  `ContextService.activeStepThreshold = 250`. A day with zero steps across all 24 buckets — not
+  carried, or not yet observed — emits no row for any of the four; a day that *is* covered but
+  never crosses the threshold still gets a `activity_fragmentation` row of 0 (a real measured
+  "nothing happened"), just no onset/offset/span, since there's no active hour to report one from.
+- **Places** (`ctx.places_visited`, `ctx.minutes_outside_home`, `ctx.timezone_shift`) — `CLVisit`
+  is now durably persisted (`location_visit` table, `Store.insert(visit:)`) the moment the
+  delegate fires, not held in memory and lost. `startLocationMonitoring()` was previously dead
+  code — nothing called it — and even if it had been called, it monitored significant location
+  *changes*, never visits. Both are fixed: `startLocationMonitoring()` now actually calls
+  `startMonitoringVisits()` and is invoked from `AppServices.bootstrap()`. Home is inferred from
+  overnight clustering same as before, now cached in `sync_anchor` and only recomputed if the
+  cache is older than 7 days, per spec. **`timezone_shift`'s definition changed**: the prior
+  session's version compared each day to *home's* timezone; this spec defines it as change
+  *vs. the previous day*, which is also what makes it a dense daily variable (most days: 0) rather
+  than the rare-travel annotation it was before — re-read the spec text carefully after an
+  initial pass carried the old definition over by habit; caught before it shipped.
+- **Additional HealthKit signals** — `ctx.headphone_audio_minutes` (session duration, summed),
+  `ctx.flights_climbed` (count, summed), both via a shared `HealthKitService.quantitySamples`
+  fetch + per-day `ContextService` derivation, no row for a day with no samples. `walkingSpeedMean`
+  is the one construct in this batch, not a context feature only — full `Derive`/`daily_construct`
+  wiring (a one-line addition to `HealthKitService.quantityMap`, since that pipeline is already
+  metric-agnostic) *and* fed into the context-association scan's feature pool
+  (`Recompute.executeFullScan`), so it's tested both as a subject and as an explanatory variable.
+  New `MetricFamily.mobility` so it doesn't get deduplicated against VO2max/endurance-score in
+  the Findings UI. Apple-Watch-only signals (`appleStandTime`, `timeInDaylight`) named in the
+  spec as examples of graceful-absence handling were not added as new tracked features — no
+  derivation formula was given for either, and `appleSleepingWristTemperature`
+  (`tempWristDeviation`) already demonstrates the same absence-handling pattern working correctly
+  for this Garmin-only user, which is what that checklist item is actually asking to be true.
+- **Rank correlation and the feature budget** are the same generic mechanisms built in round
+  one, now with real callers: `rankTransformed` routes `ctx.headphone_audio_minutes`,
+  `ctx.automotive_minutes`, and `ctx.flights_climbed` to Spearman in `Recompute.executeFullScan`.
+  `Analyzer.maxDenseContextFeatures` stays 20; the real count once everything above is wired is
+  15 (verified by test, matching the spec's own tally) — 14 tier-2 `ctx.*` metrics plus
+  `walkingSpeedMean`'s dual role, with headroom to 20 unchanged.
+- **The independent minimum-N clock** (a feature's gate should count from its own first
+  observation, not install date or a construct's deeper history) needed no new bookkeeping.
+  `Analyzer.align` already only pairs days where *both* sides have a value, so a feature with
+  three weeks of history can never produce more than three weeks of paired observations no
+  matter how long the construct's own history is — this was true before this session and is now
+  covered by a test (`testMinimumNGateCountsFromFeaturesOwnHistoryNotConstructsDeeperHistory`)
+  instead of just asserted.
+
+**A real bug found and fixed while writing the calendar-verification tests the spec asked
+for**: `calendarFeatures`' day-range walk used a literal calendar-date read
+(`Day(from, calendar:)`) while event bucketing used `DayBoundary`'s fallback-aware
+`boundary.day(for:)`, which shifts anything before 04:00 local to the previous day. Harmless for
+timed events (which are essentially never at exactly midnight), but an all-day event's start
+*is* always exactly midnight — so its sparse annotation row could be bucketed under a day the
+walk never visited, and silently vanish. Both now walk via `boundary.day(for:)` consistently.
+
 ## Not yet wired
 
-- **Calendar/location permission is never requested.** `ContextService.requestCalendarAccess()`
-  and the location-monitoring entry point exist and work, but nothing in the UI calls them —
-  no onboarding screen, no button, no `.task`. This is why `ScanFamily.contextAssociations` is
-  empty in practice (see "second deviation" above) and why tier never reaches 2 on a real
-  device today. Highest-value next wire: a real affordance for it, most naturally as an action
-  on the existing `TierPrompt` view, which currently just displays text. Motion is the one
-  exception: `ContextService.motionAvailability`/`motionContextFeatures` are wired into
-  `AppServices.bootstrap()` and the background-delivery callback already, since CoreMotion's
-  system permission prompt is triggered by the query itself and needs no separate UI.
-- **CoreLocation visit accumulation.** `ContextService` posts visits on a notification;
-  nothing yet holds them between launches. Moot until the permission above is actually
-  requested.
+- **Calendar permission is never requested.** `ContextService.requestCalendarAccess()` exists
+  and works, but nothing in the UI calls it — no onboarding screen, no button, no `.task`. This
+  is why `ctx.meeting_hours`/`ctx.first_event_hour`/`ctx.last_event_hour` stay empty in practice
+  on a real device today. Location, by contrast, **is** now requested (see "round two" above) —
+  `startLocationMonitoring()` runs from `bootstrap()`, the same way the CoreMotion query
+  implicitly prompts, since visit monitoring's system dialog is its own onboarding moment and
+  didn't need a bespoke screen the way a full calendar-access request arguably does.
 - **Strain calibration.** `Strain.compressionC` (90) and `compressionFull` (480) are
   placeholders. They need tuning against reference days before the 0–21 number means
   anything. Until then it is an internally consistent ordinal, not a comparable score.

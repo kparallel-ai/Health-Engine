@@ -18,16 +18,28 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
     case respirationAvgOvernight  = "respiration.avg_overnight"
     case tempWristDeviation       = "temp.wrist_deviation"
     case loadStrainTrimp          = "load.strain_trimp"
+    /// A fatigue/physiology signal, not merely context — a full construct with its own
+    /// baseline, wired through `Derive` exactly like resting heart rate. It's *also* fed into
+    /// the context-association candidate pool (see `Recompute.executeFullScan`), so it can be
+    /// tested both as a subject (what affects gait speed) and as an explanatory feature (does
+    /// gait speed predict next-day HRV).
+    case walkingSpeedMean         = "gait.walking_speed_mean"
 
-    // Tier 2 — EventKit, CoreLocation
+    // Tier 2 — EventKit, CoreLocation, CoreMotion, HealthKit-sourced context
     case ctxMeetingHours          = "ctx.meeting_hours"
     case ctxFirstEventHour        = "ctx.first_event_hour"
     case ctxLastEventHour         = "ctx.last_event_hour"
     case ctxMinutesOutsideHome    = "ctx.minutes_outside_home"
     case ctxTimezoneShift         = "ctx.timezone_shift"
+    case ctxPlacesVisited         = "ctx.places_visited"
     case ctxSedentaryMaxBlock     = "ctx.sedentary_max_block"
-    case ctxActivityTransitions   = "ctx.activity_transitions"
     case ctxAutomotiveMinutes     = "ctx.automotive_minutes"
+    case ctxActivityOnsetHour     = "ctx.activity_onset_hour"
+    case ctxActivityOffsetHour    = "ctx.activity_offset_hour"
+    case ctxActiveSpanHours       = "ctx.active_span_hours"
+    case ctxActivityFragmentation = "ctx.activity_fragmentation"
+    case ctxHeadphoneAudioMinutes = "ctx.headphone_audio_minutes"
+    case ctxFlightsClimbed        = "ctx.flights_climbed"
 
     // Tier 3 — Garmin
     case hrvRMSSDOvernight        = "hrv.rmssd_overnight"
@@ -51,11 +63,14 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .respirationAvgOvernight:                   return "brpm"
         case .tempWristDeviation:                        return "C"
         case .loadStrainTrimp:                           return "au_0_21"
-        case .ctxMeetingHours, .ctxFirstEventHour,
-             .ctxLastEventHour, .ctxTimezoneShift:       return "h"
+        case .walkingSpeedMean:                          return "m_s"
+        case .ctxMeetingHours, .ctxFirstEventHour, .ctxLastEventHour,
+             .ctxTimezoneShift, .ctxActivityOnsetHour,
+             .ctxActivityOffsetHour, .ctxActiveSpanHours:  return "h"
         case .ctxMinutesOutsideHome, .ctxSedentaryMaxBlock,
-             .ctxAutomotiveMinutes:                       return "min"
-        case .ctxActivityTransitions:                    return "count"
+             .ctxAutomotiveMinutes, .ctxHeadphoneAudioMinutes: return "min"
+        case .ctxPlacesVisited, .ctxActivityFragmentation,
+             .ctxFlightsClimbed:                          return "count"
         case .hrvStatusGarmin:                           return "enum"
         case .bodyBatteryMin, .bodyBatteryMax,
              .stressAvg:                                 return "0_100"
@@ -66,8 +81,10 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
     public var tier: Int {
         switch self {
         case .ctxMeetingHours, .ctxFirstEventHour, .ctxLastEventHour,
-             .ctxMinutesOutsideHome, .ctxTimezoneShift,
-             .ctxSedentaryMaxBlock, .ctxActivityTransitions, .ctxAutomotiveMinutes:
+             .ctxMinutesOutsideHome, .ctxTimezoneShift, .ctxPlacesVisited,
+             .ctxSedentaryMaxBlock, .ctxAutomotiveMinutes,
+             .ctxActivityOnsetHour, .ctxActivityOffsetHour, .ctxActiveSpanHours,
+             .ctxActivityFragmentation, .ctxHeadphoneAudioMinutes, .ctxFlightsClimbed:
             return 2
         case .hrvRMSSDOvernight, .hrvStatusGarmin, .bodyBatteryMin, .bodyBatteryMax,
              .stressAvg, .loadTrainingGarmin, .spo2AvgOvernight,
@@ -120,14 +137,21 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .respirationAvgOvernight: return "Respiratory Rate"
         case .tempWristDeviation:      return "Wrist Temperature Deviation"
         case .loadStrainTrimp:         return "Strain"
+        case .walkingSpeedMean:        return "Walking Speed"
         case .ctxMeetingHours:         return "Meeting Hours"
         case .ctxFirstEventHour:       return "First Event"
         case .ctxLastEventHour:        return "Last Event"
         case .ctxMinutesOutsideHome:   return "Time Away From Home"
         case .ctxTimezoneShift:        return "Timezone Shift"
+        case .ctxPlacesVisited:        return "Places Visited"
         case .ctxSedentaryMaxBlock:    return "Longest Sedentary Block"
-        case .ctxActivityTransitions:  return "Activity Transitions"
         case .ctxAutomotiveMinutes:    return "Time In Vehicle"
+        case .ctxActivityOnsetHour:    return "Activity Onset"
+        case .ctxActivityOffsetHour:   return "Activity Offset"
+        case .ctxActiveSpanHours:      return "Active Span"
+        case .ctxActivityFragmentation: return "Activity Fragmentation"
+        case .ctxHeadphoneAudioMinutes: return "Headphone Audio"
+        case .ctxFlightsClimbed:       return "Flights Climbed"
         case .hrvStatusGarmin:         return "HRV Status"
         case .bodyBatteryMin:          return "Body Battery (min)"
         case .bodyBatteryMax:          return "Body Battery (max)"
@@ -151,13 +175,18 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
         case .respirationAvgOvernight:                      return "wind"
         case .tempWristDeviation:                           return "thermometer.medium"
         case .loadStrainTrimp, .loadTrainingGarmin:          return "flame.fill"
+        case .walkingSpeedMean:                             return "figure.walk.motion"
         case .ctxMeetingHours, .ctxFirstEventHour,
              .ctxLastEventHour:                               return "calendar"
-        case .ctxMinutesOutsideHome:                        return "figure.walk"
+        case .ctxMinutesOutsideHome, .ctxPlacesVisited:     return "figure.walk"
         case .ctxTimezoneShift:                             return "globe"
         case .ctxSedentaryMaxBlock:                         return "chair.fill"
-        case .ctxActivityTransitions:                       return "arrow.triangle.swap"
         case .ctxAutomotiveMinutes:                         return "car.fill"
+        case .ctxActivityOnsetHour, .ctxActivityOffsetHour,
+             .ctxActiveSpanHours:                             return "sun.max.fill"
+        case .ctxActivityFragmentation:                     return "arrow.triangle.swap"
+        case .ctxHeadphoneAudioMinutes:                     return "headphones"
+        case .ctxFlightsClimbed:                            return "figure.stairs"
         case .bodyBatteryMin, .bodyBatteryMax:               return "battery.75"
         case .stressAvg:                                    return "brain.head.profile"
         case .spo2AvgOvernight:                             return "drop.fill"
@@ -192,9 +221,13 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
             return .oxygen
         case .vo2maxRunning, .enduranceScore:
             return .fitness
+        case .walkingSpeedMean:
+            return .mobility
         case .ctxMeetingHours, .ctxFirstEventHour, .ctxLastEventHour,
-             .ctxMinutesOutsideHome, .ctxTimezoneShift,
-             .ctxSedentaryMaxBlock, .ctxActivityTransitions, .ctxAutomotiveMinutes:
+             .ctxMinutesOutsideHome, .ctxTimezoneShift, .ctxPlacesVisited,
+             .ctxSedentaryMaxBlock, .ctxAutomotiveMinutes,
+             .ctxActivityOnsetHour, .ctxActivityOffsetHour, .ctxActiveSpanHours,
+             .ctxActivityFragmentation, .ctxHeadphoneAudioMinutes, .ctxFlightsClimbed:
             return .context
         }
     }
@@ -202,7 +235,7 @@ public enum Metric: String, Codable, CaseIterable, Sendable {
 
 public enum MetricFamily: String, Hashable, Sendable {
     case sleep, hrv, bodyBattery, heartRate, respiration, temperature, stress, load,
-         oxygen, fitness, context
+         oxygen, fitness, context, mobility
 }
 
 public enum Source: String, Codable, Sendable {
@@ -260,6 +293,25 @@ public struct DailyConstruct: Codable, Equatable, Sendable {
     public var confidence: Double
     public var flags: [String]
     public var deriveVersion: String
+}
+
+/// A raw `CLVisit`, in the app's own vocabulary. Coordinates only — never a place name or
+/// category, and never geocoded. This is the durable record; `CLVisit` itself only exists for
+/// the lifetime of one delegate callback.
+public struct LocationVisit: Codable, Equatable, Sendable {
+    public var arrival: Date
+    /// nil means the visit hadn't ended as of `recordedAt` — CoreLocation reports this as
+    /// `Date.distantFuture`, which this app never stores literally.
+    public var departure: Date?
+    public var latitude: Double
+    public var longitude: Double
+    public var recordedAt: Date
+
+    public init(arrival: Date, departure: Date?, latitude: Double, longitude: Double,
+               recordedAt: Date = Date()) {
+        self.arrival = arrival; self.departure = departure
+        self.latitude = latitude; self.longitude = longitude; self.recordedAt = recordedAt
+    }
 }
 
 public struct ContextFeature: Codable, Equatable, Sendable {

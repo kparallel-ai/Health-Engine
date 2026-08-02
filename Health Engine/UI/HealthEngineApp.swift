@@ -55,28 +55,57 @@ final class AppServices: ObservableObject {
         healthKit.startObserving { [weak self] in
             Task { @MainActor in
                 self?.triggerRecompute()
-                self?.syncMotionContext()
+                self?.syncPassiveContext()
             }
         }
+        // Visit monitoring is what "places" runs on — unlike calendar, which stays an
+        // unrequested, documented gap pending a real onboarding affordance, this one starts
+        // itself: `startMonitoringVisits()` triggers the system prompt on its own, the same way
+        // the CoreMotion query does, so there's no separate UI moment it's waiting on.
+        context.startLocationMonitoring()
         updateTier()
         triggerRecompute()
-        syncMotionContext()
+        syncPassiveContext()
     }
 
-    /// Cheap on-device query, not a statistical computation — safe to run on launch and on
-    /// every background HealthKit delivery, unlike the association scan. `CMMotionActivityManager`
-    /// only ever holds 7 days of history, so calling this often is what keeps coverage current;
-    /// see `ContextService.motionContextFeatures`.
-    func syncMotionContext() {
+    /// Cheap on-device queries, not statistical computation — safe to run on launch and on
+    /// every background HealthKit delivery, unlike the association scan (which stays
+    /// manual-only via `triggerFullScan`). Each source's own derive function decides what "no
+    /// row" means for it; this just fetches, derives, and persists.
+    func syncPassiveContext() {
         Task { [context, healthKit] in
             let now = Date()
-            guard let weekAgo = Calendar.autoupdatingCurrent.date(byAdding: .day, value: -7, to: now)
+            guard let weekAgo = Calendar.autoupdatingCurrent.date(byAdding: .day, value: -7, to: now),
+                  let monthAgo = Calendar.autoupdatingCurrent.date(byAdding: .day, value: -30, to: now)
             else { return }
             let sleep = (try? await healthKit.sleepSessions(from: weekAgo, to: now)) ?? []
             let boundary = DayBoundary(sleepSessions: sleep)
-            let features = await context.motionContextFeatures(boundary: boundary)
-            guard !features.isEmpty else { return }
-            try? context.persist(features)
+            let calendar = Calendar.autoupdatingCurrent
+
+            // Motion respects CoreMotion's own hard 7-day limit internally.
+            let motion = await context.motionContextFeatures(boundary: boundary)
+
+            // Steps, headphone audio, and flights climbed all carry HealthKit's own backfilled
+            // history rather than a platform limit like CoreMotion's — a 30-day trailing window
+            // keeps each passive sync cheap while still covering the whole history over enough
+            // launches, the same self-healing overlap `motionContextFeatures` relies on.
+            let stepBuckets = (try? await healthKit.hourlyStepBuckets(from: monthAgo, to: now)) ?? []
+            let dayShape = ContextService.deriveDayShapeFeatures(buckets: stepBuckets,
+                                                                 boundary: boundary, calendar: calendar)
+
+            let headphoneSamples = (try? await healthKit.headphoneAudioSamples(from: monthAgo, to: now)) ?? []
+            let headphone = ContextService.deriveHeadphoneFeatures(samples: headphoneSamples, boundary: boundary)
+
+            let flightsSamples = (try? await healthKit.flightsClimbedSamples(from: monthAgo, to: now)) ?? []
+            let flights = ContextService.deriveFlightsFeatures(samples: flightsSamples, boundary: boundary)
+
+            // Places reads visits already durably persisted by the location delegate — nothing
+            // to fetch here, just derive from what's accumulated since the last sync.
+            let places = context.placesFeatures(boundary: boundary)
+
+            let all = motion + dayShape + headphone + flights + places
+            guard !all.isEmpty else { return }
+            try? context.persist(all)
         }
     }
 

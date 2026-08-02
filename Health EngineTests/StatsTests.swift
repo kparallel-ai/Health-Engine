@@ -3,6 +3,7 @@
 // and never has its bounds relaxed to make a build green.
 
 import XCTest
+import EventKit
 @testable import HealthIntelligence
 
 final class StatsTests: XCTestCase {
@@ -322,9 +323,6 @@ final class StatsTests: XCTestCase {
 
         let automotive = out.first { $0.feature == .ctxAutomotiveMinutes && $0.day == day }
         XCTAssertEqual(try XCTUnwrap(automotive?.value), 30, accuracy: 0.01)      // 30 minutes automotive
-
-        let transitions = out.first { $0.feature == .ctxActivityTransitions && $0.day == day }
-        XCTAssertEqual(transitions?.value, 3)                       // 4 segments, 3 state changes
     }
 
     func testDeriveMotionFeaturesIgnoresConfidenceOnlyReemission() throws {
@@ -342,8 +340,6 @@ final class StatsTests: XCTestCase {
         let out = ContextService.deriveMotionFeatures(samples: samples, upTo: at(3),
                                                        boundary: boundary, calendar: .autoupdatingCurrent)
         let day = boundary.day(for: day0)
-        let transitions = out.first { $0.feature == .ctxActivityTransitions && $0.day == day }
-        XCTAssertEqual(transitions?.value, 0)
         // The whole 3-hour span is one continuous stationary block.
         let sedentaryMax = out.first { $0.feature == .ctxSedentaryMaxBlock && $0.day == day }
         XCTAssertEqual(try XCTUnwrap(sedentaryMax?.value), 180, accuracy: 0.01)
@@ -360,6 +356,315 @@ final class StatsTests: XCTestCase {
         let day = boundary.day(for: day0)
         let automotive = out.first { $0.feature == .ctxAutomotiveMinutes && $0.day == day }
         XCTAssertEqual(automotive?.value, 0)
+    }
+
+    // MARK: - Day shape (hourly step buckets)
+
+    /// Fixed, explicit UTC calendar for every day-shape/places/calendar test below — decouples
+    /// the assertions from whatever timezone the machine running the tests happens to be in.
+    /// `DayBoundary`'s own fallback rule shifts any instant before 04:00 *local* to the previous
+    /// day, so an implicit `.autoupdatingCurrent` calendar would make these tests' correctness
+    /// depend on the host's timezone. Every reference hour chosen below stays comfortably
+    /// clear of that 04:00 boundary.
+    private static var utc: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = TimeZone(identifier: "UTC")!
+        return c
+    }()
+
+    func testDeriveDayShapeComputesOnsetOffsetSpanAndFragmentation() throws {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+        func hour(_ h: Int) -> Date { cal.date(byAdding: .hour, value: h, to: day0)! }
+
+        // Quiet, active 7-10, quiet, active 14-15, quiet — active/inactive/active/inactive.
+        let steps: [Int: Double] = [6: 0, 7: 400, 8: 500, 9: 300, 10: 0, 14: 600, 15: 0]
+        let buckets = (0..<24).map { StepHourBucket(hourStart: hour($0), steps: steps[$0] ?? 0) }
+
+        let out = ContextService.deriveDayShapeFeatures(buckets: buckets, boundary: boundary, calendar: cal)
+        let day = Day(day0, calendar: cal)
+
+        let onset = out.first { $0.feature == .ctxActivityOnsetHour && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(onset?.value), 7, accuracy: 0.01)
+
+        let offset = out.first { $0.feature == .ctxActivityOffsetHour && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(offset?.value), 14, accuracy: 0.01)
+
+        let span = out.first { $0.feature == .ctxActiveSpanHours && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(span?.value), 7, accuracy: 0.01)
+
+        // Walk the full 24-hour active/inactive flag sequence by hand: 0-6 inactive, 7-9
+        // active, 10-13 inactive, 14 active, 15-23 inactive = 4 transitions.
+        let fragmentation = out.first { $0.feature == .ctxActivityFragmentation && $0.day == day }
+        XCTAssertEqual(fragmentation?.value, 4)
+    }
+
+    func testDeriveDayShapeEmitsFragmentationOnlyWhenNoHourCrossesThreshold() throws {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+        func hour(_ h: Int) -> Date { cal.date(byAdding: .hour, value: h, to: day0)! }
+
+        // Some steps every hour, but never enough to cross the 250-step active threshold.
+        let buckets = (0..<24).map { StepHourBucket(hourStart: hour($0), steps: 50) }
+        let out = ContextService.deriveDayShapeFeatures(buckets: buckets, boundary: boundary, calendar: cal)
+        let day = Day(day0, calendar: cal)
+
+        XCTAssertEqual(out.filter { $0.day == day }.count, 1)
+        let fragmentation = out.first { $0.feature == .ctxActivityFragmentation && $0.day == day }
+        XCTAssertEqual(fragmentation?.value, 0)
+        XCTAssertNil(out.first { $0.feature == .ctxActivityOnsetHour && $0.day == day })
+    }
+
+    func testDeriveDayShapeProducesNoRowForADayWithZeroSteps() {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+        func hour(_ h: Int) -> Date { cal.date(byAdding: .hour, value: h, to: day0)! }
+
+        let buckets = (0..<24).map { StepHourBucket(hourStart: hour($0), steps: 0) }
+        let out = ContextService.deriveDayShapeFeatures(buckets: buckets, boundary: boundary, calendar: cal)
+        XCTAssertTrue(out.isEmpty)
+    }
+
+    // MARK: - Places (CoreLocation visits)
+
+    func testInferHomeClustersOvernightVisits() throws {
+        let cal = StatsTests.utc
+        func overnightAt(_ day: Int, lat: Double, lon: Double) -> LocationVisit {
+            LocationVisit(arrival: Date(timeIntervalSince1970: Double(day) * 86400 + 23 * 3600),
+                         departure: Date(timeIntervalSince1970: Double(day) * 86400 + 30 * 3600),
+                         latitude: lat, longitude: lon)
+        }
+        // Five nights at the same spot, one outlier — the outlier must not win.
+        let visits = (0..<5).map { overnightAt($0, lat: 37.0000, lon: -122.0000) }
+                   + [overnightAt(5, lat: 40.0, lon: -74.0)]
+
+        let home = try XCTUnwrap(ContextService.inferHome(from: visits, calendar: cal))
+        XCTAssertEqual(home.coordinate.latitude, 37.0, accuracy: 0.01)
+        XCTAssertEqual(home.coordinate.longitude, -122.0, accuracy: 0.01)
+    }
+
+    func testDerivePlacesFeaturesComputesVisitedCountAndMinutesOutsideHome() throws {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let home = CLLocation(latitude: 37.0, longitude: -122.0)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+
+        let visits = [
+            // At home — should not count toward minutes-outside-home.
+            LocationVisit(arrival: day0.addingTimeInterval(9 * 3600),
+                         departure: day0.addingTimeInterval(10 * 3600), latitude: 37.0, longitude: -122.0),
+            // Far from home, 60 minutes.
+            LocationVisit(arrival: day0.addingTimeInterval(12 * 3600),
+                         departure: day0.addingTimeInterval(13 * 3600), latitude: 37.5, longitude: -122.5),
+            // Far from home, not yet departed — must not contribute a duration.
+            LocationVisit(arrival: day0.addingTimeInterval(15 * 3600),
+                         departure: nil, latitude: 37.5, longitude: -122.5)
+        ]
+
+        let out = ContextService.derivePlacesFeatures(visits: visits, home: home, boundary: boundary)
+        let day = Day(day0, calendar: cal)
+
+        let visited = out.first { $0.feature == .ctxPlacesVisited && $0.day == day }
+        XCTAssertEqual(visited?.value, 3)
+
+        let minutesAway = out.first { $0.feature == .ctxMinutesOutsideHome && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(minutesAway?.value), 60, accuracy: 0.1)
+    }
+
+    func testDerivePlacesFeaturesMinutesOutsideHomeIsMeasuredZeroWhenAllVisitsAreHome() throws {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let home = CLLocation(latitude: 37.0, longitude: -122.0)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+        let visits = [LocationVisit(arrival: day0.addingTimeInterval(9 * 3600),
+                                    departure: day0.addingTimeInterval(10 * 3600),
+                                    latitude: 37.0, longitude: -122.0)]
+
+        let out = ContextService.derivePlacesFeatures(visits: visits, home: home, boundary: boundary)
+        let day = Day(day0, calendar: cal)
+        let minutesAway = out.first { $0.feature == .ctxMinutesOutsideHome && $0.day == day }
+        XCTAssertEqual(minutesAway?.value, 0)
+    }
+
+    func testDerivePlacesFeaturesTimezoneShiftIsDayOverDayNotHomeRelative() throws {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let home = CLLocation(latitude: 37.0, longitude: -122.0)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 9))!
+
+        // Three consecutive days' visits. `TimeZone.current` (what the derivation actually
+        // reads) is constant across a single test process, so the shift between any two of
+        // these is 0 — what's under test is that later days *get* a shift row at all, chained
+        // against the previous *recorded* day rather than against home.
+        let visits = [
+            LocationVisit(arrival: day0, departure: day0.addingTimeInterval(3600), latitude: 37.0, longitude: -122.0),
+            LocationVisit(arrival: day0.addingTimeInterval(86400), departure: nil, latitude: 37.0, longitude: -122.0),
+            LocationVisit(arrival: day0.addingTimeInterval(2 * 86400), departure: nil, latitude: 37.0, longitude: -122.0)
+        ]
+        let out = ContextService.derivePlacesFeatures(visits: visits, home: home, boundary: boundary)
+
+        // No prior recorded day to compare the first entry against.
+        let day0Key = Day(day0, calendar: cal)
+        XCTAssertNil(out.first { $0.feature == .ctxTimezoneShift && $0.day == day0Key })
+
+        let day1Key = Day(day0.addingTimeInterval(86400), calendar: cal)
+        let shift = out.first { $0.feature == .ctxTimezoneShift && $0.day == day1Key }
+        XCTAssertEqual(shift?.value, 0)
+        XCTAssertEqual(shift?.isDense, true)
+    }
+
+    // MARK: - Headphone audio and flights climbed
+
+    func testDeriveHeadphoneFeaturesSumsSessionDurationPerDay() throws {
+        let boundary = DayBoundary(sleepSessions: [])
+        let day0 = Date(timeIntervalSince1970: 0)
+        let samples = [
+            QuantitySample(start: day0, end: day0.addingTimeInterval(30 * 60), value: -20),
+            QuantitySample(start: day0.addingTimeInterval(3600), end: day0.addingTimeInterval(3600 + 15 * 60), value: -25)
+        ]
+        let out = ContextService.deriveHeadphoneFeatures(samples: samples, boundary: boundary)
+        let day = boundary.day(for: day0)
+        let minutes = out.first { $0.feature == .ctxHeadphoneAudioMinutes && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(minutes?.value), 45, accuracy: 0.01)
+    }
+
+    func testDeriveFlightsFeaturesSumsCountPerDayAndOmitsUnobservedDays() throws {
+        let boundary = DayBoundary(sleepSessions: [])
+        let day0 = Date(timeIntervalSince1970: 0)
+        let samples = [
+            QuantitySample(start: day0, end: day0, value: 3),
+            QuantitySample(start: day0.addingTimeInterval(1800), end: day0.addingTimeInterval(1800), value: 2)
+        ]
+        let out = ContextService.deriveFlightsFeatures(samples: samples, boundary: boundary)
+        let day = boundary.day(for: day0)
+        let flights = out.first { $0.feature == .ctxFlightsClimbed && $0.day == day }
+        XCTAssertEqual(flights?.value, 5)
+
+        // A day nobody recorded any flights climbed on has no row — not a zero.
+        let unobservedDay = boundary.day(for: day0.addingTimeInterval(10 * 86400))
+        XCTAssertNil(out.first { $0.day == unobservedDay })
+    }
+
+    // MARK: - Calendar features (verification)
+
+    private func makeEvent(start: Date, end: Date, allDay: Bool = false) -> EKEvent {
+        let event = EKEvent(eventStore: EKEventStore())
+        event.startDate = start
+        event.endDate = end
+        event.isAllDay = allDay
+        return event
+    }
+
+    func testDeriveCalendarFeaturesMergesOverlappingEventsWithoutDoubleCounting() throws {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+        let to = cal.date(byAdding: .day, value: 1, to: day0)!
+
+        // 9-10 and 9:30-10:30 overlap; the merged block is 9-10:30 (1.5h), not 2h.
+        let events = [
+            makeEvent(start: day0.addingTimeInterval(9 * 3600), end: day0.addingTimeInterval(10 * 3600)),
+            makeEvent(start: day0.addingTimeInterval(9.5 * 3600), end: day0.addingTimeInterval(10.5 * 3600))
+        ]
+        let out = ContextService.deriveCalendarFeatures(events: events, from: day0, to: to,
+                                                         boundary: boundary, calendar: cal)
+        let day = Day(day0, calendar: cal)
+        let hours = out.first { $0.feature == .ctxMeetingHours && $0.day == day }
+        XCTAssertEqual(try XCTUnwrap(hours?.value), 1.5, accuracy: 0.01)
+    }
+
+    func testDeriveCalendarFeaturesExcludesAllDayEventsFromHourCountsAndMarksThemSparse() throws {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+        let to = cal.date(byAdding: .day, value: 1, to: day0)!
+
+        let events = [makeEvent(start: day0, end: cal.date(byAdding: .day, value: 1, to: day0)!, allDay: true)]
+        let out = ContextService.deriveCalendarFeatures(events: events, from: day0, to: to,
+                                                         boundary: boundary, calendar: cal)
+        // An all-day event always starts exactly at midnight, which is itself before
+        // `DayBoundary`'s 04:00 fallback cutoff — the day it's actually bucketed under is one
+        // `boundary.day(for:)` call, not a literal calendar-date read.
+        let day = boundary.day(for: day0)
+
+        // Dense meeting-hours row is still a measured zero — the all-day entry contributes none.
+        let denseRow = out.first { $0.feature == .ctxMeetingHours && $0.day == day && $0.isDense }
+        XCTAssertEqual(denseRow?.value, 0)
+
+        // A separate sparse annotation row marks the all-day event's presence.
+        let sparseRow = out.first { $0.feature == .ctxMeetingHours && $0.day == day && !$0.isDense }
+        XCTAssertNotNil(sparseRow)
+        XCTAssertNil(sparseRow?.value)
+    }
+
+    func testDeriveCalendarFeaturesEveryDayInRangeGetsARowIncludingEmptyDays() {
+        let cal = StatsTests.utc
+        let boundary = DayBoundary(sleepSessions: [], calendar: cal)
+        let day0 = cal.date(from: DateComponents(year: 2026, month: 1, day: 1, hour: 0))!
+        let to = cal.date(byAdding: .day, value: 2, to: day0)!
+
+        let out = ContextService.deriveCalendarFeatures(events: [], from: day0, to: to,
+                                                         boundary: boundary, calendar: cal)
+        let denseMeetingRows = out.filter { $0.feature == .ctxMeetingHours && $0.isDense }
+        XCTAssertEqual(denseMeetingRows.count, 3)
+        XCTAssertTrue(denseMeetingRows.allSatisfy { $0.value == 0 })
+    }
+
+    // MARK: - Feature budget (real tally)
+
+    func testDenseContextFeatureCountMatchesSpecTallyAndStaysUnderCap() {
+        let day = Day(raw: "2026-01-01")
+        let denseContextMetrics: [Metric] = [
+            .ctxMeetingHours, .ctxFirstEventHour, .ctxLastEventHour, .ctxMinutesOutsideHome,
+            .ctxTimezoneShift, .ctxPlacesVisited, .ctxSedentaryMaxBlock, .ctxAutomotiveMinutes,
+            .ctxActivityOnsetHour, .ctxActivityOffsetHour, .ctxActiveSpanHours,
+            .ctxActivityFragmentation, .ctxHeadphoneAudioMinutes, .ctxFlightsClimbed,
+            .walkingSpeedMean   // fed into the context scan as a feature too, per SPEC
+        ]
+        let features = denseContextMetrics.map {
+            ContextFeature(day: day, feature: $0, value: 1, isDense: true,
+                          source: .healthkit, deriveVersion: "test")
+        }
+        XCTAssertEqual(Analyzer.denseFeatureCount(features), 15)
+        XCTAssertLessThanOrEqual(Analyzer.denseFeatureCount(features), Analyzer.maxDenseContextFeatures)
+    }
+
+    // MARK: - Independent minimum-N gate
+
+    /// A construct with three years of dense history paired with a feature that only has three
+    /// weeks must be gated by the *feature's* three weeks, not the construct's three years —
+    /// `align` only pairs days where both sides have a value, so this falls out of the existing
+    /// counting mechanism rather than needing separate bookkeeping.
+    func testMinimumNGateCountsFromFeaturesOwnHistoryNotConstructsDeeperHistory() {
+        var rng = SeededRNG(seed: 0x0B5E_44)
+        let allDays = (0..<(3 * 365)).map {
+            Day(Date(timeIntervalSince1970: Double($0) * 86400), calendar: .autoupdatingCurrent)
+        }
+        let recentDays = Array(allDays.suffix(21))   // the feature's entire three weeks of life
+
+        var constructs: [DailyConstruct] = []
+        for day in allDays {
+            constructs.append(DailyConstruct(day: day, construct: .hrResting, value: gaussian(&rng),
+                                             baseline: nil, deviationZ: nil, nSamples: 1,
+                                             confidence: 1, flags: [], deriveVersion: "test"))
+        }
+        var features: [ContextFeature] = []
+        for day in recentDays {
+            features.append(ContextFeature(day: day, feature: .ctxPlacesVisited, value: gaussian(&rng),
+                                           isDense: true, source: .location, deriveVersion: "test"))
+        }
+
+        let findings = Analyzer.scan(constructs: constructs, features: features, family: .contextAssociations)
+        let match = findings.first { $0.object == Metric.ctxPlacesVisited.rawValue && $0.lagDays == 0 }
+        XCTAssertNotNil(match)
+        // The paired sample count can never exceed the shorter series, regardless of how much
+        // history the construct alone has.
+        XCTAssertLessThanOrEqual(match?.nObservations ?? .max, 21)
+        // With the base config's 60-day floor, three weeks can never reach T1 no matter the effect.
+        XCTAssertEqual(match?.tier, .t0)
     }
 
     // MARK: - Day arithmetic

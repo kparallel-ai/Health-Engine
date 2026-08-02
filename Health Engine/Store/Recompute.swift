@@ -169,10 +169,27 @@ public final class Recompute: ObservableObject {
         try Task.checkCancellation()
         phase = .scanning(0.05)
 
+        // Walking speed is "not just context" (SPEC) — it's a full construct, but its values
+        // are *also* offered to the context-association scan as a feature, so other constructs
+        // can be tested against it in the explanatory direction too (subject-direction testing
+        // already happens for free: it's in `constructs` like any other Tier-1 metric).
+        let walkingSpeedAsFeature: [ContextFeature] = constructs.compactMap { c in
+            guard c.construct == .walkingSpeedMean, let v = c.value else { return nil }
+            return ContextFeature(day: c.day, feature: c.construct, value: v, isDense: true,
+                                  source: .healthkit, deriveVersion: DeriveVersion.current)
+        }
+
         let storedFeatures = try db.features(version: IngestVersion.eventKit)
             + db.features(version: IngestVersion.location)
             + db.features(version: IngestVersion.motion)
+            + db.features(version: IngestVersion.dayShape)
+            + db.features(version: IngestVersion.hkContext)
+            + walkingSpeedAsFeature
         let contextFamily = ScanFamily.contextAssociations
+
+        // Discretised, zero-inflated, right-skewed — a linear-correlation assumption doesn't
+        // hold for these, so they're rank- rather than Pearson-correlated (see `Analyzer.scan`).
+        let skewedFeatures: Set<Metric> = [.ctxHeadphoneAudioMinutes, .ctxAutomotiveMinutes, .ctxFlightsClimbed]
 
         // Calendar/location permission is never requested anywhere in the app today, so
         // `storedFeatures` is routinely empty and the context scan alone would leave this
@@ -193,7 +210,8 @@ public final class Recompute: ObservableObject {
         // gracefully instead of contending with the UI thread for CPU time.
         let (contextFindings, biometricFindings) = await Task.detached(priority: .background) {
             let context = Analyzer.scan(constructs: constructs, features: storedFeatures,
-                                        family: contextFamily)
+                                        family: contextFamily,
+                                        rankTransformed: { skewedFeatures.contains($0) })
             let biometric = Analyzer.scan(constructs: constructs, features: selfFeatures,
                                           family: biometricFamily, config: .biometricSelf,
                                           symmetric: true)

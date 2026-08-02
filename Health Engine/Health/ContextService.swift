@@ -1,7 +1,8 @@
 // ContextService.swift
-// Epistemic role: boundary. Turns calendars and coarse location into context features.
-// A denied permission produces *no rows*, never zero-valued rows. Zero means "no meetings";
-// absent means "we don't know". Confusing the two poisons every association downstream.
+// Epistemic role: boundary. Turns calendars, coarse location, motion, and step shape into
+// context features. A denied permission produces *no rows*, never zero-valued rows. Zero means
+// "no meetings"; absent means "we don't know". Confusing the two poisons every association
+// downstream.
 
 import Foundation
 import EventKit
@@ -58,12 +59,15 @@ public final class ContextService: NSObject {
         (try? await eventStore.requestFullAccessToEvents()) ?? false
     }
 
-    /// Significant-change monitoring only. Never `startUpdatingLocation` — continuous GPS is
-    /// a battery and privacy cost with no analytic payoff at daily resolution.
+    /// Visit monitoring, not continuous updates — `CLVisit` arrival/departure events only,
+    /// low power. Significant-change monitoring stays alongside it purely as a background-wake
+    /// mechanism; neither of these is `startUpdatingLocation`, which this app never calls.
     public func startLocationMonitoring() {
-        guard CLLocationManager.significantLocationChangeMonitoringAvailable() else { return }
         locationManager.requestAlwaysAuthorization()
-        locationManager.startMonitoringSignificantLocationChanges()
+        locationManager.startMonitoringVisits()
+        if CLLocationManager.significantLocationChangeMonitoringAvailable() {
+            locationManager.startMonitoringSignificantLocationChanges()
+        }
     }
 
     // MARK: - EventKit features
@@ -73,7 +77,15 @@ public final class ContextService: NSObject {
 
         let predicate = eventStore.predicateForEvents(withStart: from, end: to, calendars: nil)
         let events = eventStore.events(matching: predicate)
+        return ContextService.deriveCalendarFeatures(events: events, from: from, to: to,
+                                                      boundary: boundary, calendar: calendar)
+    }
 
+    /// Pure — separated from `calendarFeatures` purely so it's testable without a live,
+    /// permission-gated `EKEventStore` query, the same fetch/derive split every other source
+    /// in this file already follows.
+    static func deriveCalendarFeatures(events: [EKEvent], from: Date, to: Date,
+                                       boundary: DayBoundary, calendar: Calendar) -> [ContextFeature] {
         var byDay: [Day: [EKEvent]] = [:]
         for event in events {
             guard let start = event.startDate else { continue }
@@ -81,9 +93,12 @@ public final class ContextService: NSObject {
         }
 
         // Every day in range gets rows, including days with no events — that is a measured zero.
+        // The walk has to use the same `boundary.day(for:)` assignment `byDay` was built with —
+        // a literal calendar-day walk would silently miss anything bucketed by the fallback
+        // rule, which is *every* all-day event, since those always start exactly at midnight.
         var out: [ContextFeature] = []
-        var cursor = Day(from, calendar: calendar)
-        let last = Day(to, calendar: calendar)
+        var cursor = boundary.day(for: from)
+        let last = boundary.day(for: to)
 
         while cursor <= last {
             let dayEvents = byDay[cursor] ?? []
@@ -98,13 +113,15 @@ public final class ContextService: NSObject {
 
             if let first = timed.map(\.startDate!).min() {
                 out.append(ContextFeature(day: cursor, feature: .ctxFirstEventHour,
-                                          value: hourOfDay(first), isDense: true,
-                                          source: .eventkit, deriveVersion: IngestVersion.eventKit))
+                                          value: ContextService.hourOfDay(first, calendar: calendar),
+                                          isDense: true, source: .eventkit,
+                                          deriveVersion: IngestVersion.eventKit))
             }
             if let lastEnd = timed.map(\.endDate!).max() {
                 out.append(ContextFeature(day: cursor, feature: .ctxLastEventHour,
-                                          value: hourOfDay(lastEnd), isDense: true,
-                                          source: .eventkit, deriveVersion: IngestVersion.eventKit))
+                                          value: ContextService.hourOfDay(lastEnd, calendar: calendar),
+                                          isDense: true, source: .eventkit,
+                                          deriveVersion: IngestVersion.eventKit))
             }
 
             // Sparse categorical: an all-day entry is an annotation on the timeline, not a
@@ -147,69 +164,128 @@ public final class ContextService: NSObject {
         return total / 3600
     }
 
-    private func hourOfDay(_ d: Date) -> Double {
+    /// Fractional hour of day (7:30am -> 7.5), in the given calendar's time zone — shared by
+    /// calendar events and the step-derived day-shape features so "hour" means the same thing
+    /// everywhere in this file.
+    static func hourOfDay(_ d: Date, calendar: Calendar) -> Double {
         let c = calendar.dateComponents([.hour, .minute], from: d)
         return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
     }
 
-    // MARK: - Location features
+    // MARK: - Places (CoreLocation visits)
 
-    /// Home is inferred, never asked for and never stored as an address — only as the centre
-    /// of the densest overnight cluster of coarse fixes.
-    public func locationFeatures(visits: [CLVisit], boundary: DayBoundary) -> [ContextFeature] {
-        guard locationAvailability == .granted, !visits.isEmpty else { return [] }
-        guard let home = ContextService.inferHome(from: visits, calendar: calendar) else { return [] }
+    /// The one place a `CLVisit` becomes durable. `CLVisit` itself only exists for the lifetime
+    /// of this callback; `location_visit` is what survives to the next scan. Coordinates only —
+    /// never a place name or category, never geocoded.
+    public func persistVisit(_ visit: CLVisit) {
+        let record = LocationVisit(arrival: visit.arrivalDate,
+                                   departure: visit.departureDate == Date.distantFuture ? nil : visit.departureDate,
+                                   latitude: visit.coordinate.latitude,
+                                   longitude: visit.coordinate.longitude)
+        try? db.insert(visit: record)
+    }
 
-        var minutesAway: [Day: Double] = [:]
-        var timezones: [Day: Int] = [:]
+    /// Reads every visit ever recorded — unlike CoreMotion, there's no platform history limit
+    /// here, since these are our own durably-stored rows, not a live re-query of a system log.
+    public func placesFeatures(boundary: DayBoundary) -> [ContextFeature] {
+        guard locationAvailability == .granted, let visits = try? db.visits(), !visits.isEmpty
+        else { return [] }
+        guard let home = cachedOrRecomputedHome(visits: visits) else { return [] }
+        return ContextService.derivePlacesFeatures(visits: visits, home: home, boundary: boundary)
+    }
 
-        for visit in visits {
-            guard visit.departureDate != Date.distantFuture else { continue }
-            let day = boundary.day(for: visit.arrivalDate)
-            let location = CLLocation(latitude: visit.coordinate.latitude,
-                                      longitude: visit.coordinate.longitude)
-            if location.distance(from: home) > 150 {
-                let minutes = visit.departureDate.timeIntervalSince(visit.arrivalDate) / 60
-                minutesAway[day, default: 0] += max(0, minutes)
-            }
-            timezones[day] = TimeZone.current.secondsFromGMT(for: visit.arrivalDate)
+    private struct CachedHome: Codable {
+        let latitude: Double
+        let longitude: Double
+        let computedAt: Date
+    }
+
+    /// "Recompute weekly" — home doesn't move often, and re-clustering every visit on every
+    /// scan is wasted work. `sync_anchor` already exists for exactly this kind of small cached
+    /// value; no new table needed.
+    private func cachedOrRecomputedHome(visits: [LocationVisit]) -> CLLocation? {
+        let key = "context.home_coordinate.v1"
+        if let data = try? db.anchor(key: key),
+           let cached = try? JSONDecoder().decode(CachedHome.self, from: data),
+           Date().timeIntervalSince(cached.computedAt) < 7 * 24 * 3600 {
+            return CLLocation(latitude: cached.latitude, longitude: cached.longitude)
         }
-
-        var out: [ContextFeature] = []
-        let homeOffset = TimeZone.current.secondsFromGMT()
-        for (day, minutes) in minutesAway.sorted(by: { $0.key < $1.key }) {
-            out.append(ContextFeature(day: day, feature: .ctxMinutesOutsideHome, value: minutes,
-                                      isDense: true, source: .location,
-                                      deriveVersion: IngestVersion.location))
-            if let offset = timezones[day] {
-                let shiftHours = Double(offset - homeOffset) / 3600
-                // A timezone shift happens a handful of times a year. Annotation, not variable.
-                out.append(ContextFeature(day: day, feature: .ctxTimezoneShift, value: shiftHours,
-                                          isDense: false, source: .location,
-                                          deriveVersion: IngestVersion.location))
-            }
-        }
-        return out
+        guard let home = ContextService.inferHome(from: visits, calendar: calendar) else { return nil }
+        let fresh = CachedHome(latitude: home.coordinate.latitude,
+                               longitude: home.coordinate.longitude, computedAt: Date())
+        if let data = try? JSONEncoder().encode(fresh) { try? db.saveAnchor(key: key, payload: data) }
+        return home
     }
 
     /// The modal overnight location across the history. Coarse on purpose.
-    static func inferHome(from visits: [CLVisit], calendar: Calendar) -> CLLocation? {
+    static func inferHome(from visits: [LocationVisit], calendar: Calendar) -> CLLocation? {
         let overnight = visits.filter {
-            let hour = calendar.component(.hour, from: $0.arrivalDate)
+            let hour = calendar.component(.hour, from: $0.arrival)
             return hour >= 22 || hour <= 5
         }
         guard !overnight.isEmpty else { return nil }
 
         // Grid-snap to ~100 m and take the densest cell, then average within it.
-        func key(_ v: CLVisit) -> String {
-            String(format: "%.3f,%.3f", v.coordinate.latitude, v.coordinate.longitude)
-        }
+        func key(_ v: LocationVisit) -> String { String(format: "%.3f,%.3f", v.latitude, v.longitude) }
         let clusters = Dictionary(grouping: overnight, by: key)
         guard let densest = clusters.max(by: { $0.value.count < $1.value.count })?.value else { return nil }
 
-        let lat = densest.map(\.coordinate.latitude).reduce(0, +) / Double(densest.count)
-        let lon = densest.map(\.coordinate.longitude).reduce(0, +) / Double(densest.count)
+        let lat = densest.map(\.latitude).reduce(0, +) / Double(densest.count)
+        let lon = densest.map(\.longitude).reduce(0, +) / Double(densest.count)
         return CLLocation(latitude: lat, longitude: lon)
+    }
+
+    /// Pure. `places_visited` counts every visit that arrived that day, departed or not —
+    /// `minutes_outside_home` only counts visits that have actually departed, since duration is
+    /// unknowable before then. A day with visits but no completed departures still gets a
+    /// `places_visited` row and a `minutes_outside_home` row of 0 (a real measured zero: every
+    /// visit that day happened to be at home, or hasn't ended yet), not an absent row.
+    ///
+    /// `timezone_shift` is day-over-day, not relative to home — most days it's genuinely 0,
+    /// which is what makes it a dense daily variable rather than a rare travel annotation.
+    static func derivePlacesFeatures(visits: [LocationVisit], home: CLLocation,
+                                     boundary: DayBoundary) -> [ContextFeature] {
+        var visitsByDay: [Day: Int] = [:]
+        var minutesAwayByDay: [Day: Double] = [:]
+        var timezoneByDay: [Day: Int] = [:]
+
+        for visit in visits {
+            let day = boundary.day(for: visit.arrival)
+            visitsByDay[day, default: 0] += 1
+            timezoneByDay[day] = TimeZone.current.secondsFromGMT(for: visit.arrival)
+
+            guard let departure = visit.departure else { continue }
+            let location = CLLocation(latitude: visit.latitude, longitude: visit.longitude)
+            if location.distance(from: home) > 150 {
+                let minutes = departure.timeIntervalSince(visit.arrival) / 60
+                minutesAwayByDay[day, default: 0] += max(0, minutes)
+            }
+        }
+
+        var out: [ContextFeature] = []
+        for (day, count) in visitsByDay {
+            out.append(ContextFeature(day: day, feature: .ctxPlacesVisited, value: Double(count),
+                                      isDense: true, source: .location,
+                                      deriveVersion: IngestVersion.location))
+            out.append(ContextFeature(day: day, feature: .ctxMinutesOutsideHome,
+                                      value: minutesAwayByDay[day] ?? 0, isDense: true,
+                                      source: .location, deriveVersion: IngestVersion.location))
+        }
+
+        // Chained against the previous day *with a recorded offset*, not the previous calendar
+        // day — a gap in visit coverage shouldn't manufacture a shift out of stale data.
+        var previousOffset: Int?
+        for day in timezoneByDay.keys.sorted() {
+            let offset = timezoneByDay[day]!
+            if let previousOffset {
+                let shiftHours = Double(offset - previousOffset) / 3600
+                out.append(ContextFeature(day: day, feature: .ctxTimezoneShift, value: shiftHours,
+                                          isDense: true, source: .location,
+                                          deriveVersion: IngestVersion.location))
+            }
+            previousOffset = offset
+        }
+        return out
     }
 
     // MARK: - Motion features
@@ -304,8 +380,6 @@ public final class ContextService: NSObject {
 
         var sedentaryMaxByDay: [Day: Double] = [:]
         var automotiveByDay: [Day: Double] = [:]
-        var transitionsByDay: [Day: Int] = [:]
-        var previousSignature: String?
 
         for segment in segments {
             if segment.stationary {
@@ -314,31 +388,100 @@ public final class ContextService: NSObject {
             if segment.automotive {
                 automotiveByDay[segment.day, default: 0] += segment.minutes
             }
-            // A confidence-only re-emission of the same state is not a transition — only count
-            // when the state itself changed.
-            if let previousSignature, previousSignature != segment.signature {
-                transitionsByDay[segment.day, default: 0] += 1
-            }
-            previousSignature = segment.signature
         }
 
-        // Every day that had any coverage gets a row for all three features, including zero —
-        // a day with zero automotive minutes is a measured zero, not a missing observation,
-        // since the day was actually covered. Only days with no coverage at all get no row.
+        // Every day that had any coverage gets a row for both features, including zero — a day
+        // with zero automotive minutes is a measured zero, not a missing observation, since the
+        // day was actually covered. Only days with no coverage at all get no row.
         let coveredDays = Set(segments.map(\.day))
         var out: [ContextFeature] = []
         for day in coveredDays {
             out.append(ContextFeature(day: day, feature: .ctxSedentaryMaxBlock,
                                       value: sedentaryMaxByDay[day] ?? 0, isDense: true,
                                       source: .motion, deriveVersion: IngestVersion.motion))
-            out.append(ContextFeature(day: day, feature: .ctxActivityTransitions,
-                                      value: Double(transitionsByDay[day] ?? 0), isDense: true,
-                                      source: .motion, deriveVersion: IngestVersion.motion))
             out.append(ContextFeature(day: day, feature: .ctxAutomotiveMinutes,
                                       value: automotiveByDay[day] ?? 0, isDense: true,
                                       source: .motion, deriveVersion: IngestVersion.motion))
         }
         return out
+    }
+
+    // MARK: - Day shape (hourly step buckets)
+
+    /// Named per spec — the line between "active" and "inactive" hour.
+    public static let activeStepThreshold: Double = 250
+
+    /// Pure. Each `StepHourBucket` already represents one full clock hour, gap-free across the
+    /// query range (`HKStatisticsCollectionQuery` returns a zero-sum bucket for a silent hour,
+    /// not a missing one) — which is what makes `activity_fragmentation` a real transition count
+    /// rather than an artifact of missing hours.
+    static func deriveDayShapeFeatures(buckets: [StepHourBucket], boundary: DayBoundary,
+                                       calendar: Calendar) -> [ContextFeature] {
+        guard !buckets.isEmpty else { return [] }
+        var byDay: [Day: [StepHourBucket]] = [:]
+        for b in buckets { byDay[boundary.day(for: b.hourStart), default: []].append(b) }
+
+        var out: [ContextFeature] = []
+        for (day, dayBuckets) in byDay {
+            let sorted = dayBuckets.sorted { $0.hourStart < $1.hourStart }
+            // A day with genuinely no steps at all — phone not carried, or no data yet — is not
+            // observed, not a quiet day. No row for any of the four features.
+            guard sorted.reduce(0, { $0 + $1.steps }) > 0 else { continue }
+
+            let activeFlags = sorted.map { $0.steps > ContextService.activeStepThreshold }
+            var transitions = 0
+            for i in 1..<activeFlags.count where activeFlags[i] != activeFlags[i - 1] { transitions += 1 }
+            out.append(ContextFeature(day: day, feature: .ctxActivityFragmentation,
+                                      value: Double(transitions), isDense: true,
+                                      source: .healthkit, deriveVersion: IngestVersion.dayShape))
+
+            // Onset/offset/span need at least one hour to actually cross the threshold — a
+            // fully-covered but entirely sedentary day gets a fragmentation row (0) and stops
+            // there; there is no "first active hour" to report.
+            let active = sorted.filter { $0.steps > ContextService.activeStepThreshold }
+            guard let first = active.first, let last = active.last else { continue }
+            let onset = ContextService.hourOfDay(first.hourStart, calendar: calendar)
+            let offset = ContextService.hourOfDay(last.hourStart, calendar: calendar)
+            out.append(ContextFeature(day: day, feature: .ctxActivityOnsetHour, value: onset,
+                                      isDense: true, source: .healthkit,
+                                      deriveVersion: IngestVersion.dayShape))
+            out.append(ContextFeature(day: day, feature: .ctxActivityOffsetHour, value: offset,
+                                      isDense: true, source: .healthkit,
+                                      deriveVersion: IngestVersion.dayShape))
+            out.append(ContextFeature(day: day, feature: .ctxActiveSpanHours, value: offset - onset,
+                                      isDense: true, source: .healthkit,
+                                      deriveVersion: IngestVersion.dayShape))
+        }
+        return out
+    }
+
+    // MARK: - Additional HealthKit context signals
+
+    /// Pure. Each sample's own interval is the listening-session duration; days with no
+    /// sessions logged simply have no entries in `samples`, so they never appear in the output —
+    /// no row, not zero.
+    static func deriveHeadphoneFeatures(samples: [QuantitySample],
+                                        boundary: DayBoundary) -> [ContextFeature] {
+        guard !samples.isEmpty else { return [] }
+        var minutesByDay: [Day: Double] = [:]
+        for s in samples {
+            minutesByDay[boundary.day(for: s.start), default: 0] += max(0, s.end.timeIntervalSince(s.start) / 60)
+        }
+        return minutesByDay.map { day, minutes in
+            ContextFeature(day: day, feature: .ctxHeadphoneAudioMinutes, value: minutes,
+                          isDense: true, source: .healthkit, deriveVersion: IngestVersion.hkContext)
+        }
+    }
+
+    static func deriveFlightsFeatures(samples: [QuantitySample],
+                                      boundary: DayBoundary) -> [ContextFeature] {
+        guard !samples.isEmpty else { return [] }
+        var countByDay: [Day: Double] = [:]
+        for s in samples { countByDay[boundary.day(for: s.start), default: 0] += s.value }
+        return countByDay.map { day, count in
+            ContextFeature(day: day, feature: .ctxFlightsClimbed, value: count,
+                          isDense: true, source: .healthkit, deriveVersion: IngestVersion.hkContext)
+        }
     }
 
     // MARK: - Persistence
@@ -350,12 +493,6 @@ public final class ContextService: NSObject {
 
 extension ContextService: CLLocationManagerDelegate {
     public func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
-        // Visits are held in memory by the caller and folded in at recompute time. Nothing
-        // location-shaped is written to the observation log — only derived daily minutes.
-        NotificationCenter.default.post(name: .contextVisitRecorded, object: visit)
+        persistVisit(visit)
     }
-}
-
-public extension Notification.Name {
-    static let contextVisitRecorded = Notification.Name("ContextService.visitRecorded")
 }

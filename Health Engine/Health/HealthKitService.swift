@@ -8,9 +8,26 @@ import HealthKit
 public enum IngestVersion {
     public static let healthKit = "hk-1.0.0"
     public static let eventKit  = "ek-1.0.0"
-    public static let location  = "loc-1.0.0"
+    public static let location  = "loc-1.1.0"
     public static let garmin    = "garmin-1.0.0"
     public static let motion    = "motion-1.0.0"
+    public static let dayShape  = "dayshape-1.0.0"
+    public static let hkContext = "hkctx-1.0.0"
+}
+
+/// One hour's step total from `HKStatisticsCollectionQuery`'s own pre-aggregation.
+public struct StepHourBucket: Sendable {
+    public let hourStart: Date
+    public let steps: Double
+}
+
+/// A generic HealthKit sample shape shared by headphone audio exposure and flights climbed —
+/// both are (interval, value) triplets; what differs is only which half of the pair the
+/// downstream feature actually needs.
+public struct QuantitySample: Sendable {
+    public let start: Date
+    public let end: Date
+    public let value: Double
 }
 
 public final class HealthKitService {
@@ -35,13 +52,24 @@ public final class HealthKitService {
              HKUnit.literUnit(with: .milli)
                  .unitDivided(by: HKUnit.gramUnit(with: .kilo).unitMultiplied(by: .minute()))),
         (.respiratoryRate,           .respirationAvgOvernight, HKUnit.count().unitDivided(by: .minute())),
-        (.appleSleepingWristTemperature, .tempWristDeviation,  HKUnit.degreeCelsius())
+        (.appleSleepingWristTemperature, .tempWristDeviation,  HKUnit.degreeCelsius()),
+        (.walkingSpeed,              .walkingSpeedMean,        HKUnit.meter().unitDivided(by: .second()))
+    ]
+
+    /// Read only — never synced into `observation`, never turned into a `DailyConstruct`.
+    /// These feed `ContextService`'s dedicated fetch methods for context-role features instead;
+    /// they still need their own authorisation request or the queries just come back empty.
+    private static let contextOnlyQuantityIDs: [HKQuantityTypeIdentifier] = [
+        .stepCount, .headphoneAudioExposure, .flightsClimbed
     ]
 
     private static var readTypes: Set<HKObjectType> {
         var types = Set<HKObjectType>()
         for entry in quantityMap {
             if let t = HKQuantityType.quantityType(forIdentifier: entry.id) { types.insert(t) }
+        }
+        for id in contextOnlyQuantityIDs {
+            if let t = HKQuantityType.quantityType(forIdentifier: id) { types.insert(t) }
         }
         if let hr = HKQuantityType.quantityType(forIdentifier: .heartRate) { types.insert(hr) }
         if let sleep = HKCategoryType.categoryType(forIdentifier: .sleepAnalysis) { types.insert(sleep) }
@@ -156,6 +184,68 @@ public final class HealthKitService {
                 if let error { continuation.resume(throwing: error); return }
                 let out = (samples as? [HKQuantitySample] ?? []).map {
                     HeartRateSample(time: $0.startDate, bpm: $0.quantity.doubleValue(for: unit))
+                }
+                continuation.resume(returning: out)
+            }
+            store.execute(query)
+        }
+    }
+
+    /// One bucket per clock hour, `stats.startDate` on the hour — `HKStatisticsCollectionQuery`'s
+    /// own pre-aggregation, far cheaper than pulling every raw pedometer sample and summing
+    /// client-side. `anchorDate` is rounded down to the hour so buckets land on natural clock
+    /// hours rather than drifting by whatever fraction of an hour `from` happened to be.
+    public func hourlyStepBuckets(from: Date, to: Date) async throws -> [StepHourBucket] {
+        guard let type = HKQuantityType.quantityType(forIdentifier: .stepCount) else { return [] }
+        let unit = HKUnit.count()
+        let predicate = HKQuery.predicateForSamples(withStart: from, end: to, options: .strictStartDate)
+        let anchor = calendar.dateInterval(of: .hour, for: from)?.start ?? from
+        var interval = DateComponents()
+        interval.hour = 1
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let query = HKStatisticsCollectionQuery(quantityType: type, quantitySamplePredicate: predicate,
+                                                    options: .cumulativeSum, anchorDate: anchor,
+                                                    intervalComponents: interval)
+            query.initialResultsHandler = { _, results, error in
+                if let error { continuation.resume(throwing: error); return }
+                var out: [StepHourBucket] = []
+                results?.enumerateStatistics(from: from, to: to) { stats, _ in
+                    let sum = stats.sumQuantity()?.doubleValue(for: unit) ?? 0
+                    out.append(StepHourBucket(hourStart: stats.startDate, steps: sum))
+                }
+                continuation.resume(returning: out)
+            }
+            store.execute(query)
+        }
+    }
+
+    /// Each sample's own `startDate`/`endDate` interval is what's summed downstream — for
+    /// headphone audio that's listening-session duration; for flights climbed the interval is
+    /// typically an instant and `value` (the count) is what matters. Same shape for both keeps
+    /// `ContextService`'s derivation generic over the two.
+    public func headphoneAudioSamples(from: Date, to: Date) async throws -> [QuantitySample] {
+        try await quantitySamples(.headphoneAudioExposure,
+                                  unit: .decibelAWeightedSoundPressureLevel(), from: from, to: to)
+    }
+
+    public func flightsClimbedSamples(from: Date, to: Date) async throws -> [QuantitySample] {
+        try await quantitySamples(.flightsClimbed, unit: .count(), from: from, to: to)
+    }
+
+    private func quantitySamples(_ id: HKQuantityTypeIdentifier, unit: HKUnit,
+                                 from: Date, to: Date) async throws -> [QuantitySample] {
+        guard let type = HKQuantityType.quantityType(forIdentifier: id) else { return [] }
+        let predicate = HKQuery.predicateForSamples(withStart: from, end: to, options: .strictStartDate)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let sort = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+            let query = HKSampleQuery(sampleType: type, predicate: predicate,
+                                      limit: HKObjectQueryNoLimit, sortDescriptors: [sort]) { _, samples, error in
+                if let error { continuation.resume(throwing: error); return }
+                let out = (samples as? [HKQuantitySample] ?? []).map {
+                    QuantitySample(start: $0.startDate, end: $0.endDate,
+                                   value: $0.quantity.doubleValue(for: unit))
                 }
                 continuation.resume(returning: out)
             }

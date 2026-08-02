@@ -103,6 +103,23 @@ public final class Store {
                 );
             """)
         }
+
+        // Durable `CLVisit` storage. Without this, visits only ever existed in memory for the
+        // lifetime of one delegate callback — "places" context was unbuildable at all, since a
+        // day's visits from a week ago are long gone by the time a scan runs.
+        m.registerMigration("v2") { db in
+            try db.execute(sql: """
+                CREATE TABLE location_visit (
+                    id              INTEGER PRIMARY KEY,
+                    arrival         TEXT NOT NULL,
+                    departure       TEXT,
+                    latitude        REAL NOT NULL,
+                    longitude       REAL NOT NULL,
+                    recorded_at     TEXT NOT NULL
+                );
+                CREATE INDEX ix_visit_arrival ON location_visit(arrival);
+            """)
+        }
         return m
     }
 
@@ -210,6 +227,35 @@ public final class Store {
             sql += " ORDER BY day ASC"
             return try Row.fetchAll(db, sql: sql, arguments: [version])
                 .compactMap(Self.decodeFeature)
+        }
+    }
+
+    // MARK: - Location visits (append-only)
+
+    /// A `CLVisit` arrives once, at the moment it happens — there is no re-querying it later
+    /// the way HealthKit or EventKit can be re-queried. If this isn't written down immediately,
+    /// it's gone.
+    public func insert(visit: LocationVisit) throws {
+        try dbQueue.write { db in
+            try db.execute(sql: """
+                INSERT INTO location_visit (arrival, departure, latitude, longitude, recorded_at)
+                VALUES (?,?,?,?,?)
+            """, arguments: [Self.iso(visit.arrival), visit.departure.map(Self.iso),
+                             visit.latitude, visit.longitude, Self.iso(visit.recordedAt)])
+        }
+    }
+
+    public func visits(from: Date? = nil, to: Date? = nil) throws -> [LocationVisit] {
+        try dbQueue.read { db in
+            var sql = "SELECT * FROM location_visit"
+            var conditions: [String] = []
+            var args: [DatabaseValueConvertible?] = []
+            if let from { conditions.append("arrival >= ?"); args.append(Self.iso(from)) }
+            if let to   { conditions.append("arrival <  ?"); args.append(Self.iso(to)) }
+            if !conditions.isEmpty { sql += " WHERE " + conditions.joined(separator: " AND ") }
+            sql += " ORDER BY arrival ASC"
+            return try Row.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+                .compactMap(Self.decodeVisit)
         }
     }
 
@@ -349,6 +395,14 @@ public final class Store {
         return ContextFeature(day: Day(raw: dayS), feature: m, value: row["value"],
                               isDense: (row["is_dense"] as Int? ?? 1) == 1, source: src,
                               deriveVersion: row["derive_version"] ?? "unknown")
+    }
+
+    static func decodeVisit(_ row: Row) -> LocationVisit? {
+        guard let arrivalS: String = row["arrival"], let arrival = parse(arrivalS),
+              let recS: String = row["recorded_at"], let rec = parse(recS),
+              let lat: Double = row["latitude"], let lon: Double = row["longitude"] else { return nil }
+        return LocationVisit(arrival: arrival, departure: (row["departure"] as String?).flatMap(parse),
+                             latitude: lat, longitude: lon, recordedAt: rec)
     }
 
     static func decodeFinding(_ row: Row) -> Finding? {

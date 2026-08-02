@@ -437,6 +437,14 @@ enum CorrelationRationale {
         [.oxygen, .sleep]: "Blood oxygen saturation is measured overnight, so it's mechanically tied to sleep stage and breathing pattern.",
         [.oxygen, .temperature]: "Both are overnight wrist/pulse measurements sensitive to sleep position and autonomic state.",
         [.oxygen, .heartRate]: "Both reflect cardiovascular and respiratory efficiency at rest.",
+        [.mobility, .load]: "Accumulated training fatigue commonly shows up as a measurably slower "
+            + "everyday walking pace, not just as a harder-feeling workout.",
+        [.mobility, .fitness]: "Walking speed is itself a marker of cardiovascular and "
+            + "musculoskeletal fitness, so the two tend to move together over the same weeks.",
+        [.mobility, .sleep]: "Poor or short sleep measurably slows next-day gait speed, "
+            + "independent of how tired it subjectively feels.",
+        [.mobility, .heartRate]: "Both reflect everyday cardiovascular effort — a lower resting "
+            + "heart rate and a faster natural walking pace are two views of the same fitness.",
     ]
 
     /// No specific mechanism on file for this pair — still worth saying *something* honest
